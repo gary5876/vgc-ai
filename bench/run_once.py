@@ -31,6 +31,8 @@ class BenchResult(TypedDict):
     ci95_high: float
     elapsed_sec: float
     avg_battle_ms: float
+    avg_turn_ms_a: float
+    avg_turn_ms_b: float
 
 
 def wilson_ci_95(wins: int, n: int) -> tuple[float, float]:
@@ -83,6 +85,8 @@ def run_once(
         "ci95_high": round(ci_high, 4),
         "elapsed_sec": round(elapsed, 3),
         "avg_battle_ms": round(elapsed * 1000.0 / result.n_battles, 2),
+        "avg_turn_ms_a": round(result.avg_turn_ms_a, 3),
+        "avg_turn_ms_b": round(result.avg_turn_ms_b, 3),
     }
 
 

@@ -19,3 +19,11 @@ def test_duel_win_rate_a_is_proportion_of_decided_games() -> None:
         assert abs(result.win_rate_a - expected) < 1e-9
     else:
         assert result.win_rate_a == 0.0
+
+
+def test_duel_reports_per_side_turn_timing() -> None:
+    result = duel(RandomBattlePolicy, RandomBattlePolicy, n_battles=2)
+    assert result.decisions_a > 0
+    assert result.decisions_b > 0
+    assert result.avg_turn_ms_a > 0.0
+    assert result.avg_turn_ms_b > 0.0
