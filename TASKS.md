@@ -45,6 +45,8 @@
 
 - mypy-competitor-subclass-fix: Address issue #1 — `src/vgc_ai/competitor.py:19` "Class cannot subclass 'Competitor' (has type 'Any')" — so `mypy --strict src` is green on `main`. This unblocks `policy-registry`. Likely fix: add a `type: ignore[misc]` on the class line with a comment pointing to vgc2 being untyped, OR add a minimal `Protocol`/stub for `vgc2.competition.Competitor` under a `stubs/` dir referenced from `pyproject.toml`. Acceptance: `uv run mypy --strict src` exits 0; existing `uv run pytest` stays green. No bench evidence required (typing-only).
 
+- bench-elo-gitignore: Add `bench/elo.csv` to `.gitignore`. The file is a runtime artifact produced/updated by `bench/run_continuous.py` (from the completed bench-elo task) and is currently untracked but not ignored — every autonomous loop iteration sees it in `git status`. CLAUDE.md explicitly lists "ELO traces" alongside "Training logs, MC visit tables" as artifacts that must be gitignored. One-line change to `.gitignore` next to the existing `bench/leaderboard.csv` line; no code touched. Acceptance: `git status` is clean after a `run_continuous.py` round; existing `bench/leaderboard.csv` ignore behavior unchanged. No bench evidence required (housekeeping).
+
 ## Done
 
 <!-- Most-recent first. Prune manually when this gets long. -->
