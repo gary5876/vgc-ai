@@ -9,11 +9,13 @@ import time
 from vgc2.agent.battle import GreedyBattlePolicy, RandomBattlePolicy, TreeSearchBattlePolicy
 
 from vgc_ai.eval.duel import duel
+from vgc_ai.policies.heuristic import HeuristicBattlePolicy
 
 POLICIES = {
     "random": RandomBattlePolicy,
     "greedy": GreedyBattlePolicy,
     "tree": TreeSearchBattlePolicy,
+    "heuristic": HeuristicBattlePolicy,
 }
 
 
