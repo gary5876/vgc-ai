@@ -47,6 +47,10 @@ lightning_logs/
 # Data (replays, datasets, etc.)
 data/
 
+# Bench harness output (CLAUDE.md: don't commit large simulation artifacts)
+bench/leaderboard.csv
+bench/results/
+
 # Editors / IDEs
 .vscode/
 .idea/
