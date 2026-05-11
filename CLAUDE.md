@@ -4,30 +4,32 @@ Project rules for Claude Code. Read this before any work.
 
 ## Project
 
-`vgc-ai` is an RL battle agent for **Pokemon VGC doubles** (Gen 9 regulation format) on Pokemon Showdown. We connect a Python agent to a locally-hosted Showdown server via `poke-env`. The goal is a competitive doubles agent — not singles, not random battles.
+`vgc-ai` is a competitor for the **IEEE VGC AI Competition 2026** (4th edition), held at IEEE Conference on Games (CoG) 2026 in Madrid, Sept 1-4, 2026. The competition is organized by Simão Reis (Vortex-CoLab / LIACC, Univ. Porto). Goal: top-3 finish across the three tracks.
+
+The competition runs on the **`vgc2`** framework ([`pokemon-vgc-engine`](https://gitlab.com/DracoStriker/pokemon-vgc-engine)) — a standalone abstracted Pokemon-like simulator. **It is NOT Pokemon Showdown.** Single-Pokemon-at-a-time battles, fictional roster, parametric moves. Mechanics are simplified for tractable AI work.
 
 ## Decisions (locked, ask before changing)
 
-- **VGC regulation format**: track the **current official** VGC regulation (whatever the Pokemon Co. has active). Trade-off accepted: trained models may age out when regs rotate.
-- **Team source**: **4-8 curated meta teams** maintained in `teams/` (PokéPaste-style). Not scraped, not single-team. Start at 1-2 teams for milestone 1, expand to 4-8 once training works.
-- **Reference pattern**: follow VGC-Bench's `DoublesEnv` subclass approach (no poke-env fork). See `REFERENCE_STUDY.md` for the full rationale.
+- **Target competition**: IEEE VGC AI Competition 2026, all three tracks (Battle, Championship, Rules Balance).
+- **Framework**: `vgc2` from `pokemon-vgc-engine`, pinned to commit `b0b77f9b` in `pyproject.toml`. Update only when Reis announces the 4th-edition official pin.
+- **Approach**: **MCTS / tabular Monte Carlo + heuristic eval for battle policy**; **GA or LP for team building**. Not deep RL — the 2024 3rd-place writeup (AurelianTactics) demonstrated deep RL fails under the engine's randomness, and tabular MC won.
+- **Submission**: Python `Competitor` subclass (see `vgc2.competition.Competitor`), submitted via Google Form per the 2025 procedure. Confirm format with organizers once 4th-edition rules wiki is published.
 
 ## Stack
 
 - Python **3.12**, managed via **uv**
-- `poke-env` for the Showdown client (note: doubles support is "preliminary" upstream — expect to extend it)
-- PyTorch for models
-- pytest, ruff, mypy
+- `vgc2` (the competition framework) — pinned git dep, no PyTorch needed
+- `gymnasium`, `numpy` — explicit deps
+- `pytest`, `ruff`, `mypy` for tooling
 
-Showdown runs locally over websocket at `ws://localhost:8000/showdown/websocket` by default.
+No web server, no websocket, no neural-network dependency unless we decide to add one later for a learned eval function.
 
 ## Conventions
 
-- **Source layout**: code in `src/vgc_ai/`, tests in `tests/`. Imports use absolute paths (`from vgc_ai.agents import ...`).
-- **Formatting**: `ruff format` (configured in `pyproject.toml`). Don't argue about style.
+- **Source layout**: code in `src/vgc_ai/`, tests in `tests/`. Imports use absolute paths (`from vgc_ai.policies import ...`).
+- **Formatting**: `ruff format` (configured in `pyproject.toml`).
 - **Linting**: `ruff check` should pass. Fix lint issues, don't `# noqa` them unless there's a real reason.
-- **Type hints**: required on public functions and method signatures. `mypy --strict` is the bar.
-- **Tests**: pytest, async tests use `pytest-asyncio` (already configured with `asyncio_mode = "auto"`).
+- **Type hints**: required on public functions and method signatures. `mypy --strict` is the bar. `vgc2` is untyped — annotate our interfaces against its runtime behavior.
 - **Comments**: only when *why* is non-obvious. Don't narrate *what* the code does.
 
 ## Scope discipline (important)
@@ -39,27 +41,38 @@ Showdown runs locally over websocket at `ws://localhost:8000/showdown/websocket`
 
 ## Never do
 
-- **Don't fake or mock data when poke-env is unavailable.** If you can't connect to Showdown, say so — don't invent battle states. Mocked tests that fool you are worse than no tests.
+- **Don't add Pokemon mechanics from memory.** The `vgc2` engine has its own move/type/stat semantics. Read the source — don't assume Gen 9 VGC rules apply.
+- **Don't reach for deep RL by default.** The 2024 winner's evidence is that classical search beats neural in this engine due to high variance. Prove tabular/search baselines are insufficient before training networks.
 - **Don't skip verification by reading code instead of running it.** "It should work" is not "it works." Run the test, run the script, paste the output.
 - **Don't trust your own summary.** After non-trivial changes, ask the user to read the diff, or show it explicitly.
-- **Don't add VGC mechanics from memory.** Pokemon mechanics are full of edge cases (terrain × ability × item interactions, etc.). Always cite the source (Showdown's `data/` files, Smogon's calc, `@smogon/calc`) or verify against a known case.
-- **Don't commit data, checkpoints, or replay archives.** They're gitignored — keep it that way.
+- **Don't commit large simulation artifacts.** Training logs, ELO traces, MC visit tables — all gitignored.
 
-## Reference projects (study, don't copy blindly)
+## Reference materials
 
-When you're unsure how to structure something, check what these projects did:
+Source-of-truth for the framework and competition:
 
-- **VGC-Bench** ([github.com/cameronangliss/vgc-bench](https://github.com/cameronangliss/vgc-bench)) — the published VGC doubles RL benchmark. Look here for: PSRO baselines, behavior cloning setup, eval methodology.
-- **EliteFurretAI** ([github.com/caymansimpson/EliteFurretAI](https://github.com/caymansimpson/EliteFurretAI)) — current SOTA for VGC doubles. Look here for: how to extend poke-env for VGC, transformer model design.
-- **PokéChamp** ([github.com/sethkarten/pokechamp](https://github.com/sethkarten/pokechamp)) — LLM minimax with `gen9vgc2025regi` support. Look here for: action sampling, opponent modeling.
-- **poke-env** itself ([github.com/hsahovic/poke-env](https://github.com/hsahovic/poke-env)) — the library we depend on. Read its source when something doesn't behave as expected.
+- **Framework repo**: <https://gitlab.com/DracoStriker/pokemon-vgc-engine> (pinned commit `b0b77f9b`). The `template/`, `tutorial/`, and `organization/` folders are the API surface.
+- **Companion baselines**: <https://gitlab.com/DracoStriker/vgc-agents> — Reis-authored Team Builder and Meta-Game Balance baselines.
+- **CoG 2025 competition site (last edition)**: <https://cog2025.inesc-id.pt/vgc-ai-competition/>.
+- **CoG 2026 competitions list**: <https://cog2026.org/competitions>. The 4th-edition rules wiki page is not yet published as of 2026-05-11.
+- **Discord**: <https://discord.gg/GwKHqXpdjf>. Email: simao.reis@vortex-colab.com.
 
-When citing prior art in code or PRs, link to the file and commit, not just the repo.
+Foundational papers (cite when relevant):
+
+- Reis, Reis, Lau — *VGC AI Competition - A New Model of Meta-Game Balance AI Competition*, CoG 2021 — [IEEE 9618985](https://ieeexplore.ieee.org/document/9618985).
+- Reis et al. — *An Adversarial Approach for Automated Pokemon Team Building*, IEEE ToG 2023 — [IEEE 10115492](https://ieeexplore.ieee.org/document/10115492).
+- Reis et al. — *A New Rules Balance Track*, CoG 2025 — [IEEE 11114412](https://ieeexplore.ieee.org/document/11114412).
+
+Strong prior result to study:
+
+- AurelianTactics, *VGC AI Competition 2024 Edition 3rd Place Submission* — [Medium](https://medium.com/@aureliantactics/vgc-ai-competition-2024-edition-3rd-place-submission-5420d2f6aafe). Tabular first-visit Monte Carlo, ~30M trials, 11-dim collapsed observation space.
+
+See `REFERENCE_STUDY.md` for the consolidated competition study and `docs/archive/study_pokeenv.md` for the historical record of why we are NOT on Pokemon Showdown.
 
 ## Tooling commands
 
 ```bash
-uv sync                          # install / sync deps
+uv sync                          # install / sync deps (pulls vgc2 from gitlab)
 uv run pytest                    # run tests
 uv run pytest -k <name>          # run one test
 uv run ruff format .             # format
@@ -70,13 +83,12 @@ uv run mypy src                  # type check
 ## Hooks
 
 `.claude/settings.json` includes:
-- **PostToolUse** on Edit/Write/MultiEdit → `uv run ruff format .` (idempotent, fast)
-- **Stop** → `uv run ruff check src tests` (non-blocking; surfaces lint issues at end of turn)
+- **PostToolUse** on Edit/Write/MultiEdit → `uv run ruff format .`
+- **Stop** → `uv run ruff check src tests`
 
-These require `uv sync` to have been run at least once. If hooks fail with "command not found," run `uv sync`.
+These require `uv sync` to have been run at least once. If hooks fail with "command not found," restart Claude Code so it picks up `uv` on PATH, then run `uv sync`.
 
 ## Slash commands
 
 - `/review-diff` — read staged + unstaged changes, summarize every change, flag risks
 - `/scope-check` — compare current changes to the originally-stated task
-- `/setup-showdown` — walk through setting up a local Pokemon Showdown server

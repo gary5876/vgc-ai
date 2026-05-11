@@ -1,25 +1,34 @@
 # vgc-ai
 
-A reinforcement-learning battle agent for Pokemon VGC (doubles format) on [Pokemon Showdown](https://pokemonshowdown.com/).
+A Pokemon VGC AI competitor targeting the **[IEEE VGC AI Competition 2026](https://cog2026.org/competitions)** at IEEE Conference on Games (CoG) 2026, Madrid, Sept 1-4, 2026.
 
-**Status:** very early. Project scaffolding only — no agent yet.
+**Status:** early. Project pivoted from a Pokemon-Showdown-based RL agent (see `docs/archive/study_pokeenv.md`) to the IEEE competition stack on 2026-05-11. Currently building the Competitor skeleton on the `vgc2` framework.
 
 ## What this is
 
-VGC (Video Game Championships) is the official competitive Pokemon doubles format. This project aims to train an RL agent that can play Gen 9 VGC regulation matches on a locally-hosted Pokemon Showdown server.
+The IEEE VGC AI Competition runs on [`pokemon-vgc-engine`](https://gitlab.com/DracoStriker/pokemon-vgc-engine) — a standalone abstracted Pokemon-like simulator with three tracks:
 
-The plan, roughly:
-1. Connect to a local Pokemon Showdown server via [poke-env](https://github.com/hsahovic/poke-env).
-2. Implement baseline heuristic / random agents for sanity checks.
-3. Train neural policies (PyTorch) using self-play and/or behavior cloning on human replays.
-4. Evaluate against published baselines.
+- **Battle Track** — pure battle-policy contest with randomly generated teams; single-elimination bracket.
+- **Championship Track** — team-build + battle policy across many ELO matchups.
+- **Rules Balance Track** — design rules that induce target move-usage distributions (game-design, not gameplay).
+
+This project will submit entries to all three.
+
+## Approach
+
+Classical search, not deep RL. The 2024 3rd-place submission ([AurelianTactics writeup](https://medium.com/@aureliantactics/vgc-ai-competition-2024-edition-3rd-place-submission-5420d2f6aafe)) demonstrated that the engine's variance breaks deep RL and that tabular Monte Carlo / search beats it. Plan:
+
+1. Get a `Competitor` skeleton running with all three default policies (random baselines).
+2. MCTS / tabular MC for the battle policy with a hand-crafted eval function.
+3. Genetic-algorithm or LP-based team builder.
+4. Rules Balance submission as a low-effort second-track entry.
 
 ## Stack
 
-- **Python 3.12** with [uv](https://github.com/astral-sh/uv) for env + dep management
-- **poke-env** — Showdown client / Gymnasium-style wrapper (de facto standard in this space)
-- **PyTorch** — model + training
-- **pytest / ruff / mypy** — testing, linting, type checking
+- **Python 3.12** with [uv](https://github.com/astral-sh/uv).
+- **[`vgc2`](https://gitlab.com/DracoStriker/pokemon-vgc-engine)** (pinned commit `b0b77f9b`) — the competition framework.
+- **`gymnasium`, `numpy`** — explicit deps.
+- **`pytest`, `ruff`, `mypy`** — testing, linting, type checking.
 
 ## Quickstart
 
@@ -28,36 +37,35 @@ The plan, roughly:
 #   macOS / Linux:  curl -LsSf https://astral.sh/uv/install.sh | sh
 #   Windows:        powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 
-# Install deps into a managed venv
+# Install deps (pulls vgc2 from gitlab — needs git on PATH)
 uv sync
 
-# Run the smoke test
+# Run tests
 uv run pytest
 ```
-
-You will also need a local Pokemon Showdown server. See `.claude/commands/setup-showdown.md` (or [the upstream docs](https://github.com/smogon/pokemon-showdown)) for setup.
 
 ## Project layout
 
 ```
 src/vgc_ai/
-  agents/      # Player implementations (heuristic, RL, etc.)
-  models/      # Neural network architectures
-  training/    # Training loops
-tests/         # pytest tests
-scripts/       # CLI utilities (run ladder games, eval, etc.)
-configs/       # Training / eval configs
+  competitor.py         # our Competitor subclass — entry point for submission
+  policies/
+    battle.py           # battle-turn move selection (target: MCTS)
+    selection.py        # picking which Pokemon to bring
+    teambuild.py        # team building from the roster
+tests/                  # pytest tests
+scripts/                # CLI utilities
+configs/                # configuration files
+docs/archive/           # historical material (the Showdown study lives here)
 ```
 
-## Reference projects
+## References
 
-Prior art worth knowing about:
-
-- [**VGC-Bench**](https://github.com/cameronangliss/vgc-bench) (AAMAS '25) — first VGC doubles RL benchmark; ships >700k human battle logs and PSRO baselines.
-- [**EliteFurretAI**](https://github.com/caymansimpson/EliteFurretAI) — 125M-param transformer for VGC doubles, supervised + RNaD RL.
-- [**PokéChamp**](https://github.com/sethkarten/pokechamp) (ICML '25 spotlight) — LLM minimax agent with a VGC variant (`gen9vgc2025regi`).
-- [**Metamon**](https://github.com/UT-Austin-RPL/metamon) — offline RL on millions of human replays; singles only, doubles in development.
-- [**foul-play**](https://github.com/pmariglia/foul-play) — strongest non-ML public bot, search-based.
+- **Foundational paper**: Reis, Reis, Lau, *VGC AI Competition - A New Model of Meta-Game Balance AI Competition*, CoG 2021 — [IEEE 9618985](https://ieeexplore.ieee.org/document/9618985).
+- **Adversarial team building**: Reis et al., IEEE ToG 2023 — [IEEE 10115492](https://ieeexplore.ieee.org/document/10115492).
+- **Rules Balance Track**: Reis et al., CoG 2025 — [IEEE 11114412](https://ieeexplore.ieee.org/document/11114412).
+- **AurelianTactics 2024 writeup**: [Medium](https://medium.com/@aureliantactics/vgc-ai-competition-2024-edition-3rd-place-submission-5420d2f6aafe).
+- **Reis baseline agents**: <https://gitlab.com/DracoStriker/vgc-agents>.
 
 ## License
 
