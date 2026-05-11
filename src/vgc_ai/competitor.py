@@ -16,7 +16,7 @@ from vgc_ai.policies.selection import VgcAiSelectionPolicy
 from vgc_ai.policies.teambuild import VgcAiTeamBuildPolicy
 
 
-class VgcAiCompetitor(Competitor):
+class VgcAiCompetitor(Competitor):  # type: ignore[misc]  # vgc2 is untyped; Competitor resolves as Any under --strict
     def __init__(self, name: str = "vgc-ai") -> None:
         self._name = name
         self._battle_policy: BattlePolicy = VgcAiBattlePolicy()
