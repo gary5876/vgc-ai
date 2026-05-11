@@ -33,9 +33,32 @@ CSV_COLUMNS: list[str] = [
     "ci95_high",
     "elapsed_sec",
     "avg_battle_ms",
+    "avg_turn_ms_a",
+    "avg_turn_ms_b",
 ]
 SLOW_POLICIES: frozenset[str] = frozenset({"tree"})
 BASELINE_ORDER: tuple[str, ...] = ("greedy", "random")
+
+
+def migrate_schema() -> None:
+    """Rewrite ``leaderboard.csv`` with the current header if it has older columns.
+
+    Existing rows are preserved; new columns are written as empty strings for
+    rows from older schema versions.
+    """
+    if not LEADERBOARD.exists():
+        return
+    with LEADERBOARD.open("r", newline="", encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        existing = reader.fieldnames or []
+        if existing == CSV_COLUMNS:
+            return
+        rows = list(reader)
+    with LEADERBOARD.open("w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=CSV_COLUMNS, extrasaction="ignore")
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({k: row.get(k, "") for k in CSV_COLUMNS})
 
 
 def pairs_to_bench(include_slow: bool) -> list[tuple[str, str]]:
@@ -73,6 +96,8 @@ def main(argv: list[str] | None = None) -> int:
     if not pairs:
         print("No pairs to bench.", file=sys.stderr)
         return 1
+
+    migrate_schema()
 
     print(f"[bench] round start: {len(pairs)} matchups, n={args.n}", flush=True)
     round_start = time.perf_counter()
