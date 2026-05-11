@@ -14,8 +14,8 @@ import time
 from datetime import UTC, datetime
 from typing import TypedDict
 
-from vgc_ai.cli import POLICIES
 from vgc_ai.eval.duel import duel
+from vgc_ai.policies.registry import POLICIES
 
 
 class BenchResult(TypedDict):

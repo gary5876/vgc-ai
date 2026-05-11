@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 
 from bench.run_once import BenchResult, run_once
-from vgc_ai.cli import POLICIES
+from vgc_ai.policies.registry import POLICIES
 
 LEADERBOARD = Path("bench/leaderboard.csv")
 CSV_COLUMNS: list[str] = [
