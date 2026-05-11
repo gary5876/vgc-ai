@@ -24,7 +24,7 @@ Working notes on the competition we are targeting. Citations only — no inferre
 - **Companion baselines**: <https://gitlab.com/DracoStriker/vgc-agents>.
 - **Python**: 3.10.12 declared, works on 3.12 in practice.
 - **Deps**: `gymnasium~=1.0`, `numpy~=2.2`, `setuptools~=75.8`. **No PyTorch required by the framework.**
-- **Not Showdown-compatible.** Standalone simulator. Single-Pokemon active, fictional roster, parametric moves. No real species, abilities, items, dynamax, tera, or doubles.
+- **Not Showdown-compatible.** Standalone simulator. Fictional roster, parametric moves. No real species, abilities, items, dynamax, or tera. Supports both singles and doubles via the `n_active` parameter — **Battle Track default is `n_active=2` (doubles)** per `organization/run_battle_track.py`. (Earlier reading of this study said "singles only"; that was incorrect.)
 
 ### Key abstractions (`vgc2`)
 
@@ -78,3 +78,12 @@ Public records are thin. No official leaderboard on the wiki. Ask Reis directly 
 - `pyproject.toml` pins `vgc2` at the commit above. Update only when Reis announces the 4th-edition official pin.
 - All Pokemon-Showdown / poke-env code was removed in the pivot commit; see `docs/archive/study_pokeenv.md` for the historical record of that direction.
 - No GPU dependency. PyTorch and similar are not required deps; add only if a specific learned component proves necessary later.
+
+## Measured baselines (2026-05-11, doubles, team_size=4, max_pkm_moves=4)
+
+| Matchup            | n  | Win rate (a) | Per-battle wall time |
+| ------------------ | -- | ------------ | -------------------- |
+| Greedy vs Random   | 20 | 90.0%        | 0.04 s               |
+| Tree   vs Random   | 3  | 100.0%       | 170.9 s              |
+
+Key takeaway: `TreeSearchBattlePolicy(max_depth=1)` is unusable for live submission in doubles — ~11 s per turn. `GreedyBattlePolicy` is the submission-viable floor. Our default `VgcAiBattlePolicy` is therefore aliased to Greedy; replacing it requires both (a) beating Greedy in head-to-head duels and (b) fitting a sub-second-per-turn budget.

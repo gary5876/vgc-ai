@@ -6,13 +6,14 @@ Project rules for Claude Code. Read this before any work.
 
 `vgc-ai` is a competitor for the **IEEE VGC AI Competition 2026** (4th edition), held at IEEE Conference on Games (CoG) 2026 in Madrid, Sept 1-4, 2026. The competition is organized by Simão Reis (Vortex-CoLab / LIACC, Univ. Porto). Goal: top-3 finish across the three tracks.
 
-The competition runs on the **`vgc2`** framework ([`pokemon-vgc-engine`](https://gitlab.com/DracoStriker/pokemon-vgc-engine)) — a standalone abstracted Pokemon-like simulator. **It is NOT Pokemon Showdown.** Single-Pokemon-at-a-time battles, fictional roster, parametric moves. Mechanics are simplified for tractable AI work.
+The competition runs on the **`vgc2`** framework ([`pokemon-vgc-engine`](https://gitlab.com/DracoStriker/pokemon-vgc-engine)) — a standalone abstracted Pokemon-like simulator. **It is NOT Pokemon Showdown.** Supports both singles and doubles via the `n_active` parameter; the **Battle Track default is `n_active=2` (doubles)** per `organization/run_battle_track.py`. Fictional roster, parametric moves. Mechanics are simplified for tractable AI work.
 
 ## Decisions (locked, ask before changing)
 
 - **Target competition**: IEEE VGC AI Competition 2026, all three tracks (Battle, Championship, Rules Balance).
 - **Framework**: `vgc2` from `pokemon-vgc-engine`, pinned to commit `b0b77f9b` in `pyproject.toml`. Update only when Reis announces the 4th-edition official pin.
 - **Approach**: **MCTS / tabular Monte Carlo + heuristic eval for battle policy**; **GA or LP for team building**. Not deep RL — the 2024 3rd-place writeup (AurelianTactics) demonstrated deep RL fails under the engine's randomness, and tabular MC won.
+- **Default battle policy**: `GreedyBattlePolicy` (submission-viable). `TreeSearchBattlePolicy` is too slow for doubles (~11 s/turn measured at `max_depth=1, n_active=2`) and is reserved for **local benchmarking only**, not the submission. Any new battle policy must beat Greedy AND fit a sub-second-per-turn budget.
 - **Submission**: Python `Competitor` subclass (see `vgc2.competition.Competitor`), submitted via Google Form per the 2025 procedure. Confirm format with organizers once 4th-edition rules wiki is published.
 
 ## Stack
