@@ -90,6 +90,15 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help=f"Include slow policies: {sorted(SLOW_POLICIES)}",
     )
+    p.add_argument(
+        "--fixed-team-seed",
+        type=int,
+        default=None,
+        help=(
+            "If set, replay the same teams + engine rolls across all N battles "
+            "of every matchup in the round. Reduces variance across policy comparisons."
+        ),
+    )
     args = p.parse_args(argv)
 
     pairs = pairs_to_bench(args.include_slow)
@@ -104,7 +113,7 @@ def main(argv: list[str] | None = None) -> int:
     for a, b in pairs:
         t0 = time.perf_counter()
         try:
-            result = run_once(a, b, args.n)
+            result = run_once(a, b, args.n, fixed_team_seed=args.fixed_team_seed)
         except Exception as exc:
             print(f"[bench] {a} vs {b} FAILED: {exc}", file=sys.stderr, flush=True)
             continue
