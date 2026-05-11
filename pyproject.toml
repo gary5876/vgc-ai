@@ -63,6 +63,9 @@ indent-style = "space"
 testpaths = ["tests"]
 pythonpath = ["src"]
 asyncio_mode = "auto"
+markers = [
+    "integration: tests that need a running Pokemon Showdown server (gated by VGC_AI_LIVE=1)",
+]
 
 [tool.mypy]
 python_version = "3.12"
