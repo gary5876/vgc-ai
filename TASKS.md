@@ -21,6 +21,12 @@
 
 <!-- Claude appends here when it has an idea but is not allowed to act on it. You move them to Approved (or delete) when you triage. -->
 
+- policy-heuristic-eval-deterministic-rollout: Unblock path (a) for `policy-heuristic-eval`. Modify the 1-ply forward simulation inside `HeuristicBattlePolicy` to use vgc2's `ZERO_RNG` (or equivalent deterministic damage/accuracy path) so the eval comparison across candidate actions isn't dominated by simulator stochasticity. Keep the heuristic weights as currently checked in on `auto/policy-heuristic-eval-20260511`. Acceptance: same gate as the original task (n=200, `win_rate_a > 0.5`, `ci95_low > 0.5`, `avg_battle_ms < 5000`). Rationale: weight-tuning at n=100 returned 50-50, so the issue is more likely sim noise than weight calibration.
+
+- policy-heuristic-eval-n500: Unblock path (b) for `policy-heuristic-eval`. Re-run the existing `heuristic` vs `greedy` bench on the auto/policy-heuristic-eval-20260511 branch at n=500 to see if the Wilson lower bound clears 0.5 (point estimate was 0.545 at n=200, ci95_low=0.4758). Acceptance: `bench/results/policy-heuristic-eval.json` at n=500 satisfies the standard gate. Cheap: ~5× the prior runtime (200 games took seconds). Do this before (a) if (a) turns out to be invasive.
+
+- mypy-competitor-subclass-fix: Address issue #1 — `src/vgc_ai/competitor.py:19` "Class cannot subclass 'Competitor' (has type 'Any')" — so `mypy --strict src` is green on `main`. This unblocks `policy-registry`. Likely fix: add a `type: ignore[misc]` on the class line with a comment pointing to vgc2 being untyped, OR add a minimal `Protocol`/stub for `vgc2.competition.Competitor` under a `stubs/` dir referenced from `pyproject.toml`. Acceptance: `uv run mypy --strict src` exits 0; existing `uv run pytest` stays green. No bench evidence required (typing-only).
+
 ## Done
 
 <!-- Most-recent first. Prune manually when this gets long. -->
