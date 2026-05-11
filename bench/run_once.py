@@ -53,6 +53,7 @@ def run_once(
     *,
     team_size: int = 4,
     n_active: int = 2,
+    fixed_team_seed: int | None = None,
 ) -> BenchResult:
     if policy_a not in POLICIES:
         raise SystemExit(f"unknown policy_a: {policy_a!r} (known: {sorted(POLICIES)})")
@@ -66,6 +67,7 @@ def run_once(
         n_battles=n_battles,
         team_size=team_size,
         n_active=n_active,
+        fixed_team_seed=fixed_team_seed,
     )
     elapsed = time.perf_counter() - t0
 
@@ -97,6 +99,15 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--n", type=int, default=100, help="Number of battles")
     p.add_argument("--team-size", type=int, default=4)
     p.add_argument("--n-active", type=int, default=2)
+    p.add_argument(
+        "--fixed-team-seed",
+        type=int,
+        default=None,
+        help=(
+            "If set, replay the same teams + engine rolls across all N battles. "
+            "Reduces variance when comparing different policies on identical battles."
+        ),
+    )
     p.add_argument("--output", type=str, default=None, help="Optional path to write the JSON to")
     args = p.parse_args(argv)
 
@@ -106,6 +117,7 @@ def main(argv: list[str] | None = None) -> int:
         args.n,
         team_size=args.team_size,
         n_active=args.n_active,
+        fixed_team_seed=args.fixed_team_seed,
     )
     text = json.dumps(result, indent=2)
     print(text)

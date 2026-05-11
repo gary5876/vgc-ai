@@ -8,11 +8,13 @@ team-build influence. Useful for ranking policies during development.
 
 from __future__ import annotations
 
+import random
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+import numpy as np
 from vgc2.agent import BattlePolicy
 from vgc2.battle_engine import BattleEngine, BattleRuleParam, State
 from vgc2.battle_engine.game_state import get_battle_teams
@@ -86,8 +88,33 @@ def duel(
     n_active: int = 2,
     max_pkm_moves: int = 4,
     params: BattleRuleParam | None = None,
+    fixed_team_seed: int | None = None,
 ) -> DuelResult:
     params = params or BattleRuleParam()
+    # When fixed_team_seed is set, derive deterministic team/engine RNGs and seed
+    # numpy's legacy global state so RandomBattlePolicy (which uses
+    # numpy.random.choice) and any other legacy-RNG consumers are also
+    # reproducible. Variance across policies is reduced because matchups
+    # replay the same teams and same engine rolls.
+    rng: np.random.Generator | None = None
+    engine_rngs: (
+        tuple[
+            tuple[np.random.Generator, ...],
+            tuple[np.random.Generator, ...],
+        ]
+        | None
+    ) = None
+    if fixed_team_seed is not None:
+        rng = np.random.default_rng(fixed_team_seed)
+        # vgc2 mixes three RNG sources: a Generator passed via constructor /
+        # gen_team kwargs, numpy.random.choice (legacy global state, used by
+        # RandomBattlePolicy), and random.sample/shuffle (stdlib, used by the
+        # team generator and other policies). Seed all three for full
+        # reproducibility.
+        np.random.seed(fixed_team_seed)
+        random.seed(fixed_team_seed)
+        side_rngs = tuple(rng for _ in range(n_active))
+        engine_rngs = (side_rngs, side_rngs)
     wins_a = 0
     wins_b = 0
     ties = 0
@@ -96,7 +123,13 @@ def duel(
     decisions_a = 0
     decisions_b = 0
     for _ in range(n_battles):
-        team = gen_team(team_size, max_pkm_moves), gen_team(team_size, max_pkm_moves)
+        if rng is not None:
+            team = (
+                gen_team(team_size, max_pkm_moves, rng=rng),
+                gen_team(team_size, max_pkm_moves, rng=rng),
+            )
+        else:
+            team = gen_team(team_size, max_pkm_moves), gen_team(team_size, max_pkm_moves)
         label_teams(team)
         team_view = TeamView(team[0]), TeamView(team[1])
         state = State(get_battle_teams(team, n_active))
@@ -104,7 +137,16 @@ def duel(
             StateView(state, 0, team_view),
             StateView(state, 1, team_view),
         )
-        engine = BattleEngine(state, debug=False)
+        if engine_rngs is not None:
+            engine = BattleEngine(
+                state,
+                debug=False,
+                acc_rng=engine_rngs,
+                eff_rng=engine_rngs,
+                sta_rng=engine_rngs,
+            )
+        else:
+            engine = BattleEngine(state, debug=False)
 
         a_raw = policy_a()
         b_raw = policy_b()
