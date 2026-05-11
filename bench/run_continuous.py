@@ -14,8 +14,15 @@ import argparse
 import csv
 import sys
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
+from bench.elo import (
+    append_rating_rows,
+    initial_state,
+    load_current_ratings,
+    update_pair,
+)
 from bench.run_once import BenchResult, run_once
 from vgc_ai.cli import POLICIES
 
@@ -110,6 +117,8 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"[bench] round start: {len(pairs)} matchups, n={args.n}", flush=True)
     round_start = time.perf_counter()
+    elo_states = load_current_ratings()
+    touched: list[str] = []
     for a, b in pairs:
         t0 = time.perf_counter()
         try:
@@ -118,12 +127,29 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[bench] {a} vs {b} FAILED: {exc}", file=sys.stderr, flush=True)
             continue
         append_row(result)
+        state_a = elo_states.get(a, initial_state())
+        state_b = elo_states.get(b, initial_state())
+        new_a, new_b = update_pair(
+            state_a, state_b, result["wins_a"], result["wins_b"], result["ties"]
+        )
+        elo_states[a] = new_a
+        elo_states[b] = new_b
+        for name in (a, b):
+            if name not in touched:
+                touched.append(name)
         print(
             f"[bench] {a:>10} vs {b:<10} "
             f"-> {result['wins_a']}-{result['wins_b']}-{result['ties']} "
             f"({result['win_rate_a']:.1%}, "
+            f"elo {new_a.elo:.0f}/{new_b.elo:.0f}, "
             f"{time.perf_counter() - t0:.1f}s)",
             flush=True,
+        )
+    if touched:
+        append_rating_rows(
+            touched,
+            elo_states,
+            timestamp=datetime.now(UTC).isoformat(timespec="seconds"),
         )
     print(f"[bench] round done in {time.perf_counter() - round_start:.1f}s", flush=True)
     return 0
