@@ -33,6 +33,36 @@ No web server, no websocket, no neural-network dependency unless we decide to ad
 - **Type hints**: required on public functions and method signatures. `mypy --strict` is the bar. `vgc2` is untyped — annotate our interfaces against its runtime behavior.
 - **Comments**: only when *why* is non-obvious. Don't narrate *what* the code does.
 
+## Commit convention
+
+Subject line: `<type>(<scope>): <imperative summary>` — max 72 chars, no trailing period.
+
+| `<type>` | When |
+|---|---|
+| `feat` | Adds new behaviour (a policy, a CLI subcommand, a bench feature). |
+| `fix` | Corrects broken behaviour (test red, runtime error, wrong output). |
+| `refactor` | Moves code without changing observable behaviour. |
+| `bench` | Changes to `bench/` only. |
+| `test` | Adds or changes tests only. |
+| `chore` | Tooling, deps, CI, `.gitignore`, `pyproject.toml` non-dep tweaks. |
+| `docs` | `*.md`, docstrings, comments. |
+| `auto` | Reserved for the **autonomous loop**: `auto(<task-slug>): <summary>`. |
+| `tasks` | TASKS.md-only updates (status changes, blocked notes). |
+
+`<scope>` is the area: `policy`, `eval`, `bench`, `cli`, `ops`, `mypy`, etc. Omit if it would just repeat the type.
+
+Body (optional, blank line after subject): explain **why** — the constraint, the failed alternative, the prior result you're building on. Reference issue / PR numbers (`closes #1`, `refs #3`). Keep code-level *what* in the diff, not the message.
+
+Examples (loop-friendly):
+- `refactor(policy): extract POLICIES into vgc_ai.policies.registry`
+- `feat(policy): add HeuristicBattlePolicy (win_rate=0.62 vs greedy)`
+- `fix(mypy): allow Competitor subclass with type: ignore (closes #1)`
+- `bench: add avg_turn_ms columns`
+- `tasks: mark policy-registry blocked pending #1`
+- `auto(bench-turn-timing): add per-turn timing to leaderboard`
+
+Legacy milestone-style subjects (`B1: ...`, `M1: ...`) from earlier in the history pre-date this convention — keep them as-is.
+
 ## Scope discipline (important)
 
 - **One task, one concern.** If you spot an unrelated issue while working, *note it in your response* — do not fix it in the same change.
