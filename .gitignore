@@ -47,6 +47,9 @@ lightning_logs/
 # Data (replays, datasets, etc.)
 data/
 
+# Trained policy artifacts (CLAUDE.md: MC visit tables must be gitignored)
+models/
+
 # Bench harness output (CLAUDE.md: don't commit large simulation artifacts)
 bench/leaderboard.csv
 bench/elo.csv
