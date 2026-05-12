@@ -108,10 +108,19 @@ class TabularMCBattlePolicy(BattlePolicy):  # type: ignore[misc]  # vgc2 is unty
     visited.
     """
 
-    def __init__(self, rng_seed: int | None = None) -> None:
+    def __init__(
+        self,
+        rng_seed: int | None = None,
+        *,
+        model_path: str | Path | None = None,
+    ) -> None:
         self._q: dict[StateKey, list[float]] = {}
         self._n: dict[StateKey, list[int]] = {}
         self._rng = random.Random(rng_seed)
+        if model_path is not None:
+            path = Path(model_path)
+            if path.is_file():
+                self.load(path)
 
     def decision(
         self,

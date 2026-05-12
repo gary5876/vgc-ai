@@ -5,17 +5,21 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from functools import partial
 
 from vgc2.agent.battle import GreedyBattlePolicy, RandomBattlePolicy, TreeSearchBattlePolicy
 
-from vgc_ai.eval.duel import duel
+from vgc_ai.eval.duel import PolicyFactory, duel
 from vgc_ai.policies.tabular_mc import TabularMCBattlePolicy
 
-POLICIES = {
+POLICIES: dict[str, PolicyFactory] = {
     "random": RandomBattlePolicy,
     "greedy": GreedyBattlePolicy,
     "tree": TreeSearchBattlePolicy,
-    "tabular_mc": TabularMCBattlePolicy,
+    # partial so the bench/inference path auto-picks-up a trained checkpoint
+    # at models/tabular_mc.json without requiring callers to know the path.
+    # Falls back to an empty (untrained) table when the file does not exist.
+    "tabular_mc": partial(TabularMCBattlePolicy, model_path="models/tabular_mc.json"),
 }
 
 
