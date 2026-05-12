@@ -1,23 +1,31 @@
-"""Self-play training for ``TabularMCBattlePolicy``.
+"""Training driver for ``TabularMCBattlePolicy``.
 
-Each episode generates a fresh pair of random teams, instantiates two
-agents that *share one Q-table* (via the same ``TabularMCBattlePolicy``
-instance — both sides read/write through it), and plays one battle. At
-each turn, each side encodes its own ``StateView`` perspective, picks an
-ε-greedy joint action, and records ``(state_key, action_idx, 0.0)``. On
-terminal, the winning side's last step gets reward ``+1.0`` and the
-losing side's last step gets reward ``-1.0`` (both trajectories are
-retained — first-visit MC needs the negative signal to distinguish "this
-action led to a win" from "this action got me KO'd but my team carried").
-Ties are still discarded.
+Two training regimes, switched by ``--warmup``:
 
-The collected trajectories are flushed to ``policy.learn(...)``
-every ``--batch`` episodes (default 100). A checkpoint is saved to
-``--model-path`` (default ``models/tabular_mc.json``) every
-``--checkpoint`` episodes (default 1000) and at exit.
+1. **Warmup (episodes ``[0, --warmup)``)** — single-sided rollouts vs
+   :class:`vgc2.agent.battle.GreedyBattlePolicy`. One side runs the
+   learning ``TabularMCBattlePolicy``, the other side runs a fresh
+   ``GreedyBattlePolicy``. The tabular side alternates each episode for
+   balanced state coverage (even ep → tabular on side 0, odd ep → tabular
+   on side 1). Only the tabular side's trajectory is recorded for MC
+   updates; the greedy side is not learning.
+2. **Self-play (episodes ``[--warmup, --episodes)``)** — both sides are
+   the same ``TabularMCBattlePolicy`` instance (shared Q-table). Both
+   trajectories are recorded.
 
-ε decays linearly from 0.1 (episode 0) to 0.05 (episode ``--decay-end``,
-default 10000), then stays flat at 0.05.
+In either regime, at each turn each tabular side encodes its own
+``StateView`` perspective, picks an ε-greedy joint action via the shared
+Q-table, and records ``(state_key, action_idx, 0.0)``. On terminal, the
+winning side's last step gets reward ``+1.0`` and the losing side's last
+step gets ``-1.0`` (loss signal retained from the
+``policy-tabular-mc-train-with-loss-signal`` change). Ties are discarded.
+
+Trajectories are flushed to ``policy.learn(...)`` every ``--batch``
+episodes. A checkpoint is saved to ``--model-path`` every
+``--checkpoint`` episodes and at exit.
+
+ε decays linearly from 0.1 (episode 0) to 0.05 (episode ``--decay-end``),
+then stays flat at 0.05.
 
 Resume: if ``--resume`` is passed and the model file exists, the table is
 loaded before training continues.
@@ -31,7 +39,7 @@ import time
 from pathlib import Path
 
 import numpy as np
-from vgc2.agent.battle import get_actions
+from vgc2.agent.battle import GreedyBattlePolicy, get_actions
 from vgc2.battle_engine import BattleEngine, BattleRuleParam, State
 from vgc2.battle_engine.game_state import get_battle_teams
 from vgc2.battle_engine.view import StateView, TeamView
@@ -93,17 +101,24 @@ def _run_training_episode(
     team_size: int,
     n_active: int,
     max_pkm_moves: int,
+    opponent_policy: GreedyBattlePolicy | None = None,
+    tabular_side: int = 0,
 ) -> tuple[
     list[tuple[StateKey, int, float]] | None,
     list[tuple[StateKey, int, float]] | None,
     int,
 ]:
-    """Play one self-play battle. Return ``(traj_0, traj_1, winner)``.
+    """Play one training battle. Return ``(traj_0, traj_1, winner)``.
 
-    On a non-tie outcome both trajectories are returned: the winning side's
-    last step has reward ``+1.0`` (terminal return ``g = +1``) and the losing
-    side's last step has reward ``-1.0`` (terminal return ``g = -1``). On a
-    tie both trajectories are ``None`` (no terminal reward to attribute).
+    If ``opponent_policy`` is ``None``, both sides are the learning tabular
+    policy (self-play) — both trajectories are returned. Otherwise the
+    tabular policy plays ``tabular_side`` and ``opponent_policy`` plays the
+    other side; only the tabular trajectory is returned (the opponent side
+    is ``None`` regardless of outcome).
+
+    On a non-tie outcome the winning side's last step has reward ``+1.0``
+    and the losing side's last step has reward ``-1.0``. On a tie both
+    returned trajectories are ``None``.
     """
     team = (
         gen_team(team_size, max_pkm_moves, rng=np_rng),
@@ -119,33 +134,46 @@ def _run_training_episode(
     traj_0: list[tuple[StateKey, int, float]] = []
     traj_1: list[tuple[StateKey, int, float]] = []
 
+    tabular_0 = opponent_policy is None or tabular_side == 0
+    tabular_1 = opponent_policy is None or tabular_side == 1
+
     while not engine.finished():
-        joint_0 = get_actions((state.sides[0].team, state.sides[1].team))
-        joint_1 = get_actions((state.sides[1].team, state.sides[0].team))
-        if not joint_0 or not joint_1:
+        joint_0 = get_actions((state.sides[0].team, state.sides[1].team)) if tabular_0 else None
+        joint_1 = get_actions((state.sides[1].team, state.sides[0].team)) if tabular_1 else None
+        if (tabular_0 and not joint_0) or (tabular_1 and not joint_1):
             break
-        key_0 = encode_state(view_0)
-        key_1 = encode_state(view_1)
-        idx_0 = _epsilon_greedy_index(policy, key_0, len(joint_0), epsilon, rng)
-        idx_1 = _epsilon_greedy_index(policy, key_1, len(joint_1), epsilon, rng)
-        traj_0.append((key_0, idx_0, 0.0))
-        traj_1.append((key_1, idx_1, 0.0))
-        engine.run_turn((list(joint_0[idx_0]), list(joint_1[idx_1])))
+        if tabular_0:
+            assert joint_0 is not None
+            key_0 = encode_state(view_0)
+            idx_0 = _epsilon_greedy_index(policy, key_0, len(joint_0), epsilon, rng)
+            traj_0.append((key_0, idx_0, 0.0))
+            action_0 = list(joint_0[idx_0])
+        else:
+            assert opponent_policy is not None
+            action_0 = list(opponent_policy.decision(view_0, team_view[1]))
+        if tabular_1:
+            assert joint_1 is not None
+            key_1 = encode_state(view_1)
+            idx_1 = _epsilon_greedy_index(policy, key_1, len(joint_1), epsilon, rng)
+            traj_1.append((key_1, idx_1, 0.0))
+            action_1 = list(joint_1[idx_1])
+        else:
+            assert opponent_policy is not None
+            action_1 = list(opponent_policy.decision(view_1, team_view[0]))
+        engine.run_turn((action_0, action_1))
 
     winner = engine.winning_side
-    if winner == 0 and traj_0 and traj_1:
-        last_w = traj_0[-1]
-        traj_0[-1] = (last_w[0], last_w[1], 1.0)
-        last_l = traj_1[-1]
-        traj_1[-1] = (last_l[0], last_l[1], -1.0)
-        return traj_0, traj_1, 0
-    if winner == 1 and traj_0 and traj_1:
-        last_w = traj_1[-1]
-        traj_1[-1] = (last_w[0], last_w[1], 1.0)
-        last_l = traj_0[-1]
-        traj_0[-1] = (last_l[0], last_l[1], -1.0)
-        return traj_0, traj_1, 1
-    return None, None, -1
+    if winner not in (0, 1):
+        return None, None, -1
+    if traj_0:
+        last = traj_0[-1]
+        traj_0[-1] = (last[0], last[1], 1.0 if winner == 0 else -1.0)
+    if traj_1:
+        last = traj_1[-1]
+        traj_1[-1] = (last[0], last[1], 1.0 if winner == 1 else -1.0)
+    out_0 = traj_0 if tabular_0 and traj_0 else None
+    out_1 = traj_1 if tabular_1 and traj_1 else None
+    return out_0, out_1, winner
 
 
 def train(
@@ -157,6 +185,7 @@ def train(
     model_path: Path,
     resume: bool,
     seed: int,
+    warmup: int = 5000,
     team_size: int = 4,
     n_active: int = 2,
     max_pkm_moves: int = 4,
@@ -170,16 +199,23 @@ def train(
         rng_seed=seed,
         model_path=model_path if resume else None,
     )
+    greedy_opponent = GreedyBattlePolicy()
+    greedy_opponent.set_params(params)
 
     batch: list[list[tuple[StateKey, int, float]]] = []
     wins_0 = 0
     wins_1 = 0
     ties = 0
+    warmup_wins_tabular = 0
+    warmup_wins_opponent = 0
     t0 = time.perf_counter()
     last_log = t0
 
     for ep in range(episodes):
         epsilon = epsilon_at(ep, decay_end)
+        in_warmup = ep < warmup
+        opponent = greedy_opponent if in_warmup else None
+        tabular_side = ep % 2 if in_warmup else 0
         traj_0, traj_1, winner = _run_training_episode(
             policy,
             epsilon=epsilon,
@@ -189,7 +225,14 @@ def train(
             team_size=team_size,
             n_active=n_active,
             max_pkm_moves=max_pkm_moves,
+            opponent_policy=opponent,
+            tabular_side=tabular_side,
         )
+        if in_warmup and winner in (0, 1):
+            if winner == tabular_side:
+                warmup_wins_tabular += 1
+            else:
+                warmup_wins_opponent += 1
         if winner == 0:
             wins_0 += 1
         elif winner == 1:
@@ -208,11 +251,13 @@ def train(
             policy.save(model_path)
             now = time.perf_counter()
             eps_per_sec = (ep + 1) / (now - t0)
+            phase = "warmup" if in_warmup else "self-play"
             print(
-                f"[ep {ep + 1}/{episodes}] "
+                f"[ep {ep + 1}/{episodes} {phase}] "
                 f"eps_per_sec={eps_per_sec:.1f} "
                 f"epsilon={epsilon:.3f} "
                 f"wins_0={wins_0} wins_1={wins_1} ties={ties} "
+                f"warmup_tab/opp={warmup_wins_tabular}/{warmup_wins_opponent} "
                 f"|Q|={len(policy._q)} "
                 f"checkpoint→{model_path}",
                 flush=True,
@@ -234,6 +279,9 @@ def train(
         "wins_0": wins_0,
         "wins_1": wins_1,
         "ties": ties,
+        "warmup": warmup,
+        "warmup_wins_tabular": warmup_wins_tabular,
+        "warmup_wins_opponent": warmup_wins_opponent,
         "q_size": len(policy._q),
         "last_log": last_log,  # for completeness, harmless
     }
@@ -245,6 +293,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--batch", type=int, default=100, dest="batch_size")
     p.add_argument("--checkpoint", type=int, default=1000, dest="checkpoint_every")
     p.add_argument("--decay-end", type=int, default=10000)
+    p.add_argument(
+        "--warmup",
+        type=int,
+        default=5000,
+        help="Run [0, warmup) episodes vs GreedyBattlePolicy before self-play. 0 disables warmup.",
+    )
     p.add_argument("--model-path", type=Path, default=Path("models/tabular_mc.json"))
     p.add_argument("--resume", action="store_true")
     p.add_argument("--seed", type=int, default=0)
@@ -258,6 +312,7 @@ def main(argv: list[str] | None = None) -> int:
         batch_size=args.batch_size,
         checkpoint_every=args.checkpoint_every,
         decay_end=args.decay_end,
+        warmup=args.warmup,
         model_path=args.model_path,
         resume=args.resume,
         seed=args.seed,
@@ -271,6 +326,8 @@ def main(argv: list[str] | None = None) -> int:
         f"elapsed_sec={summary['elapsed_sec']} "
         f"eps_per_sec={summary['eps_per_sec']} "
         f"wins_0={summary['wins_0']} wins_1={summary['wins_1']} ties={summary['ties']} "
+        f"warmup={summary['warmup']} "
+        f"warmup_tab/opp={summary['warmup_wins_tabular']}/{summary['warmup_wins_opponent']} "
         f"|Q|={summary['q_size']} "
         f"saved→{args.model_path}",
         flush=True,
