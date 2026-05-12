@@ -49,6 +49,7 @@ data/
 
 # Bench harness output (CLAUDE.md: don't commit large simulation artifacts)
 bench/leaderboard.csv
+bench/elo.csv
 bench/results/
 
 # Editors / IDEs
