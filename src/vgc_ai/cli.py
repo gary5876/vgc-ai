@@ -9,6 +9,7 @@ import time
 from vgc2.agent.battle import GreedyBattlePolicy, RandomBattlePolicy, TreeSearchBattlePolicy
 
 from vgc_ai.eval.duel import duel
+from vgc_ai.policies.battle import GreedyWithSwitchBBattlePolicy
 from vgc_ai.policies.tabular_mc import TabularMCBattlePolicy
 
 POLICIES = {
@@ -16,6 +17,7 @@ POLICIES = {
     "greedy": GreedyBattlePolicy,
     "tree": TreeSearchBattlePolicy,
     "tabular_mc": TabularMCBattlePolicy,
+    "greedy_switch_b": GreedyWithSwitchBBattlePolicy,
 }
 
 
