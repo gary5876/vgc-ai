@@ -5,10 +5,13 @@ agents that *share one Q-table* (via the same ``TabularMCBattlePolicy``
 instance — both sides read/write through it), and plays one battle. At
 each turn, each side encodes its own ``StateView`` perspective, picks an
 ε-greedy joint action, and records ``(state_key, action_idx, 0.0)``. On
-terminal, the winning side's last step gets reward ``+1.0``; the losing
-side's trajectory is discarded.
+terminal, the winning side's last step gets reward ``+1.0`` and the
+losing side's last step gets reward ``-1.0`` (both trajectories are
+retained — first-visit MC needs the negative signal to distinguish "this
+action led to a win" from "this action got me KO'd but my team carried").
+Ties are still discarded.
 
-The collected winning trajectories are flushed to ``policy.learn(...)``
+The collected trajectories are flushed to ``policy.learn(...)``
 every ``--batch`` episodes (default 100). A checkpoint is saved to
 ``--model-path`` (default ``models/tabular_mc.json``) every
 ``--checkpoint`` episodes (default 1000) and at exit.
@@ -90,10 +93,17 @@ def _run_training_episode(
     team_size: int,
     n_active: int,
     max_pkm_moves: int,
-) -> tuple[list[tuple[StateKey, int, float]] | None, int]:
-    """Play one self-play battle. Return ``(winning_trajectory, winner)``.
+) -> tuple[
+    list[tuple[StateKey, int, float]] | None,
+    list[tuple[StateKey, int, float]] | None,
+    int,
+]:
+    """Play one self-play battle. Return ``(traj_0, traj_1, winner)``.
 
-    ``winning_trajectory`` is ``None`` on tie (no terminal reward to attribute).
+    On a non-tie outcome both trajectories are returned: the winning side's
+    last step has reward ``+1.0`` (terminal return ``g = +1``) and the losing
+    side's last step has reward ``-1.0`` (terminal return ``g = -1``). On a
+    tie both trajectories are ``None`` (no terminal reward to attribute).
     """
     team = (
         gen_team(team_size, max_pkm_moves, rng=np_rng),
@@ -123,15 +133,19 @@ def _run_training_episode(
         engine.run_turn((list(joint_0[idx_0]), list(joint_1[idx_1])))
 
     winner = engine.winning_side
-    if winner == 0 and traj_0:
-        last = traj_0[-1]
-        traj_0[-1] = (last[0], last[1], 1.0)
-        return traj_0, 0
-    if winner == 1 and traj_1:
-        last = traj_1[-1]
-        traj_1[-1] = (last[0], last[1], 1.0)
-        return traj_1, 1
-    return None, -1
+    if winner == 0 and traj_0 and traj_1:
+        last_w = traj_0[-1]
+        traj_0[-1] = (last_w[0], last_w[1], 1.0)
+        last_l = traj_1[-1]
+        traj_1[-1] = (last_l[0], last_l[1], -1.0)
+        return traj_0, traj_1, 0
+    if winner == 1 and traj_0 and traj_1:
+        last_w = traj_1[-1]
+        traj_1[-1] = (last_w[0], last_w[1], 1.0)
+        last_l = traj_0[-1]
+        traj_0[-1] = (last_l[0], last_l[1], -1.0)
+        return traj_0, traj_1, 1
+    return None, None, -1
 
 
 def train(
@@ -166,7 +180,7 @@ def train(
 
     for ep in range(episodes):
         epsilon = epsilon_at(ep, decay_end)
-        traj, winner = _run_training_episode(
+        traj_0, traj_1, winner = _run_training_episode(
             policy,
             epsilon=epsilon,
             rng=rng,
@@ -182,8 +196,10 @@ def train(
             wins_1 += 1
         else:
             ties += 1
-        if traj is not None:
-            batch.append(traj)
+        if traj_0 is not None:
+            batch.append(traj_0)
+        if traj_1 is not None:
+            batch.append(traj_1)
         if (ep + 1) % batch_size == 0 and batch:
             policy.learn(batch)
             batch.clear()
