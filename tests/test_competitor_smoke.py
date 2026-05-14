@@ -1,9 +1,9 @@
 """Smoke test — instantiate VgcAiCompetitor and check policies are wired."""
 
-from vgc2.agent.battle import GreedyBattlePolicy
 from vgc2.agent.selection import RandomSelectionPolicy
 
 from vgc_ai.competitor import VgcAiCompetitor
+from vgc_ai.policies.heuristic_det import HeuristicDetBattlePolicy
 from vgc_ai.policies.teambuild import MetaUsageTeamBuildPolicy
 
 
@@ -17,6 +17,6 @@ def test_custom_name() -> None:
 
 def test_policies_wired_to_expected_baselines() -> None:
     c = VgcAiCompetitor()
-    assert isinstance(c.battlepolicy, GreedyBattlePolicy)
+    assert isinstance(c.battlepolicy, HeuristicDetBattlePolicy)
     assert isinstance(c.selectionpolicy, RandomSelectionPolicy)
     assert isinstance(c.teambuildpolicy, MetaUsageTeamBuildPolicy)
