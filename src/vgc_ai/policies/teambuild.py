@@ -7,36 +7,84 @@ Two builders:
   ``vgc_ai.eval.matchup_table``) and picks species via mean-best-matchup
   greedy: first pick is the species with the highest mean win rate against
   the roster; subsequent picks maximize ``mean_j(max_t(M[t][j]))`` — i.e.
-  expand the set of roster species the team can collectively beat. Table is
-  cached per-roster on the policy instance.
+  expand the set of roster species the team can collectively beat. Table
+  is cached per-roster on the policy instance.
 
-- ``MetaUsageTeamBuildPolicy`` — the prior baseline (PR #12). Pure usage /
-  stat-sum rank. Cleared the championship gate vs ``RandomTeamBuildPolicy``
+- ``MetaUsageTeamBuildPolicy`` — the prior baseline (PR #12). Pure usage
+  / stat-sum rank. Cleared the championship gate vs ``RandomTeamBuildPolicy``
   at +177 ELO. Kept for A/B comparison.
 
-For both: move pick is ``top max_pkm_moves by base_power * STAB``. EVs flat
-``(85,)*6``, IVs ``(31,)*6``, Nature.SERIOUS. ``BasicMeta.usage_rate_pokemon``
-raises ZeroDivisionError when called before any matches — defended in
-``_species_priority`` for the few code paths that still consult meta.
+Both builders go through ``_build_team_command``, which applies
+**per-species build tuning** to whatever species the builder picks:
+
+- ``_species_role(species)``: physical if ``ATK >= SPA``, else special.
+- ``_optimal_evs``: sweeper spread ``(6 HP / 252 ATK or SPA / 252 SPE)``.
+- ``_optimal_nature``: ``JOLLY`` / ``TIMID`` if ``SPE >= attacker stat``
+  (speed-positive); else ``ADAMANT`` / ``MODEST``. All four move from
+  the unused attacker stat — never costing the stat we're using.
+- ``_move_priority(species, role)``: ``base_power * STAB * role_match``
+  where off-category moves get a 0.7 penalty (not a hard exclusion).
+
+``BasicMeta.usage_rate_pokemon`` raises ``ZeroDivisionError`` when called
+before any matches are recorded (epoch 0 of every championship) —
+defended in ``_species_priority``.
 """
 
 from __future__ import annotations
+
+from typing import Literal
 
 import numpy as np
 import numpy.typing as npt
 from vgc2.agent import TeamBuildCommand, TeamBuildPolicy
 from vgc2.balance.meta import Meta, Roster
-from vgc2.battle_engine.modifiers import Nature
+from vgc2.battle_engine.modifiers import Category, Nature, Stat
 from vgc2.battle_engine.move import Move
 from vgc2.battle_engine.pokemon import PokemonSpecies
 
 from vgc_ai.eval.matchup_table import build_matchup_table, roster_cache_key
 
-_DEFAULT_EVS: tuple[int, int, int, int, int, int] = (85, 85, 85, 85, 85, 85)
 _DEFAULT_IVS: tuple[int, int, int, int, int, int] = (31, 31, 31, 31, 31, 31)
-_DEFAULT_NATURE: Nature = Nature.SERIOUS
 _STAB_MULTIPLIER: float = 1.5
+_OFF_CATEGORY_PENALTY: float = 0.7
 _MATCHUP_TABLE_N_PER_PAIR: int = 10
+
+Role = Literal["physical", "special"]
+
+# Sweeper EV spreads. Slots match the Stat IntEnum (HP, ATK, DEF, SPA, SPD, SPE).
+# 6 + 252 + 252 = 510, which is the cap fix_builds enforces.
+_PHYSICAL_EVS: tuple[int, int, int, int, int, int] = (6, 252, 0, 0, 0, 252)
+_SPECIAL_EVS: tuple[int, int, int, int, int, int] = (6, 0, 0, 252, 0, 252)
+
+
+def _species_role(species: PokemonSpecies) -> Role:
+    """Physical or special attacker based on base stats."""
+    atk = species.base_stats[Stat.ATTACK]
+    spa = species.base_stats[Stat.SPECIAL_ATTACK]
+    return "physical" if atk >= spa else "special"
+
+
+def _optimal_nature(species: PokemonSpecies, role: Role) -> Nature:
+    """Pick a nature that boosts our offensive stat without hurting it.
+
+    All four candidate natures move from the *unused* attacker stat into
+    either the attacker stat or Speed — never costing us the stat we
+    depend on. The speed-positive variants (JOLLY / TIMID) win when the
+    species is already fast enough that the extra raw offense isn't worth
+    the slower movement.
+    """
+    speed = species.base_stats[Stat.SPEED]
+    if role == "physical":
+        attacker = species.base_stats[Stat.ATTACK]
+        # JOLLY: +SPE -SPA (never costs ATK). ADAMANT: +ATK -SPA.
+        return Nature.JOLLY if speed >= attacker else Nature.ADAMANT
+    attacker = species.base_stats[Stat.SPECIAL_ATTACK]
+    # TIMID: +SPE -ATK. MODEST: +SPA -ATK.
+    return Nature.TIMID if speed >= attacker else Nature.MODEST
+
+
+def _optimal_evs(role: Role) -> tuple[int, int, int, int, int, int]:
+    return _PHYSICAL_EVS if role == "physical" else _SPECIAL_EVS
 
 
 def _species_priority(roster: Roster, meta: Meta | None) -> list[int]:
@@ -58,31 +106,52 @@ def _species_priority(roster: Roster, meta: Meta | None) -> list[int]:
     return sorted(range(len(roster)), key=lambda i: (-sum(roster[i].base_stats), i))
 
 
-def _move_priority(species: PokemonSpecies) -> list[int]:
+def _move_priority(species: PokemonSpecies, role: Role | None = None) -> list[int]:
     """Return species move indices ordered by score (highest first).
 
-    Score = ``base_power * (1.5 if STAB else 1.0)``. Ties broken by move index.
+    Score = ``base_power * (1.5 if STAB else 1.0) * (1.0 if matches role else 0.7)``.
+    When ``role`` is ``None``, the role match is skipped. Ties broken by move
+    index.
     """
     species_types = set(species.types)
+    target_category: Category | None
+    if role == "physical":
+        target_category = Category.PHYSICAL
+    elif role == "special":
+        target_category = Category.SPECIAL
+    else:
+        target_category = None
 
     def score(move: Move) -> float:
         stab = _STAB_MULTIPLIER if move.pkm_type in species_types else 1.0
-        return float(move.base_power) * stab
+        role_match = 1.0
+        if target_category is not None and move.base_power > 0:
+            role_match = 1.0 if move.category == target_category else _OFF_CATEGORY_PENALTY
+        return float(move.base_power) * stab * role_match
 
     return sorted(range(len(species.moves)), key=lambda i: (-score(species.moves[i]), i))
 
 
 def _build_team_command(roster: Roster, picks: list[int], max_pkm_moves: int) -> TeamBuildCommand:
+    """Build per-species-tuned commands for the chosen picks.
+
+    Each picked species gets a role-matched EV spread, nature, and
+    role-weighted move priority. Used by both ``MetaUsageTeamBuildPolicy``
+    and ``MatchupTableTeamBuildPolicy``.
+    """
     cmds: TeamBuildCommand = []
     for species_idx in picks:
         species = roster[species_idx]
-        move_idx = _move_priority(species)[:max_pkm_moves]
-        cmds.append((species_idx, _DEFAULT_EVS, _DEFAULT_IVS, _DEFAULT_NATURE, move_idx))
+        role = _species_role(species)
+        evs = _optimal_evs(role)
+        nature = _optimal_nature(species, role)
+        move_idx = _move_priority(species, role)[:max_pkm_moves]
+        cmds.append((species_idx, evs, _DEFAULT_IVS, nature, move_idx))
     return cmds
 
 
 class MetaUsageTeamBuildPolicy(TeamBuildPolicy):  # type: ignore[misc]
-    """Rank species by meta usage (or stat sum), pick best moves by base_power * STAB."""
+    """Rank species by meta usage (or stat sum); per-species-tuned build."""
 
     def decision(
         self,

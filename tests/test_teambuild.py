@@ -16,7 +16,10 @@ from vgc_ai.policies.teambuild import (
     MetaUsageTeamBuildPolicy,
     VgcAiTeamBuildPolicy,
     _move_priority,
+    _optimal_evs,
+    _optimal_nature,
     _species_priority,
+    _species_role,
 )
 
 MAX_TEAM_SIZE = 4
@@ -156,3 +159,59 @@ def test_deterministic_across_calls() -> None:
     a = policy.decision(roster, None, MAX_TEAM_SIZE, MAX_PKM_MOVES, N_ACTIVE)
     b = policy.decision(roster, None, MAX_TEAM_SIZE, MAX_PKM_MOVES, N_ACTIVE)
     assert a == b
+
+
+def test_species_role_picks_physical_for_high_atk() -> None:
+    _, roster = _make_roster()
+    for species in roster:
+        atk = species.base_stats[1]
+        spa = species.base_stats[3]
+        expected = "physical" if atk >= spa else "special"
+        assert _species_role(species) == expected
+
+
+def test_optimal_evs_sum_within_cap_for_both_roles() -> None:
+    for role in ("physical", "special"):
+        evs = _optimal_evs(role)
+        assert sum(evs) == 510
+        assert all(0 <= ev <= 255 for ev in evs)
+
+
+def test_optimal_nature_prefers_speed_when_already_fast() -> None:
+    _, roster = _make_roster()
+    species = roster[0]
+    # Force the species to have very high speed and moderate physical attack.
+    species.base_stats = (100, 100, 100, 50, 100, 200)
+    nature = _optimal_nature(species, "physical")
+    # When speed >= attacker stat, prefer speed-positive nature (JOLLY for physical).
+    from vgc2.battle_engine.modifiers import Nature
+
+    assert nature == Nature.JOLLY
+
+
+def test_optimal_nature_prefers_attacker_when_slow() -> None:
+    _, roster = _make_roster()
+    species = roster[0]
+    species.base_stats = (100, 200, 100, 50, 100, 80)
+    nature = _optimal_nature(species, "physical")
+    from vgc2.battle_engine.modifiers import Nature
+
+    assert nature == Nature.ADAMANT
+
+
+def test_move_priority_with_role_prefers_matching_category() -> None:
+    _, roster = _make_roster()
+    species = roster[0]
+    # Score must be non-increasing along the returned order, even with role weighting.
+    role_priority = _move_priority(species, role="physical")
+    species_types = set(species.types)
+    from vgc2.battle_engine.modifiers import Category
+
+    def scored(idx: int) -> float:
+        m = species.moves[idx]
+        stab = 1.5 if m.pkm_type in species_types else 1.0
+        role_match = 1.0 if m.base_power == 0 or m.category == Category.PHYSICAL else 0.7
+        return float(m.base_power) * stab * role_match
+
+    scores = [scored(i) for i in role_priority]
+    assert scores == sorted(scores, reverse=True)
