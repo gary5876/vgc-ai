@@ -1,12 +1,12 @@
 """Selection policy.
 
-``MatchupAwareSelectionPolicy`` ranks our team members by net type
-matchup against the opponent's full team and returns indices in
-descending-score order. Per ``vgc2.battle_engine.game_state.get_battle_teams``,
-the first ``n_active`` selected members start as ACTIVE; the remainder
-become RESERVES. So even when ``max_size == len(team)`` (the degenerate
-"which to bring" case in current Match defaults), the **order** of the
-selection still controls who leads — a real lever in doubles.
+``MatchupAwareSelectionPolicy`` ranks our team members by net type matchup
+against the opponent's full team and returns indices in descending-score
+order. Per ``vgc2.battle_engine.game_state.get_battle_teams``, the first
+``n_active`` selected members start as ACTIVE; the remainder become
+RESERVES. So even when ``max_size == len(team)`` (the degenerate "which to
+bring" case in current Match defaults), the **order** of the selection
+still controls who leads — a real lever in doubles.
 
 Score for our member ``i``:
 
@@ -24,8 +24,17 @@ a member that's 2x weak with neutral offense scores -1.0. Ties broken by
 original index (stable).
 
 We don't model the opponent's selection — they choose simultaneously, so
-their leads are unknown. Averaging over their full team is the
-conservative substitute.
+their leads are unknown. Averaging over their full team is the conservative
+substitute.
+
+A matchup-table-based variant of this scoring (using actual simulated win
+rates from ``vgc_ai.eval.matchup_table``) was tried and benched as a
+regression vs the type-chart proxy (mean -90 ELO over 5 seeds x 10 epochs
+in a championship A/B). Likely cause: the matchup table is built from
+singleton ``n_active=1`` battles, so it doesn't capture the doubles lead
+positioning and double-targeting that actually drive selection outcomes;
+its noise + format mismatch swamps any signal gain. The type-chart proxy
+stays as the default.
 """
 
 from __future__ import annotations

@@ -64,13 +64,17 @@ def test_matchup_handles_empty_roster() -> None:
 
 
 def test_matchup_table_cached_across_calls() -> None:
+    from vgc_ai.eval import matchup_table as mt
+
     _, roster = _make_roster(n_species=6)
+    mt.clear_matchup_table_cache()
     policy = MatchupTableTeamBuildPolicy(n_battles_per_pair=2)
-    # First call builds the table; second call must hit the cache (same key)
-    # and not rebuild — assert by checking the internal dict has exactly one entry.
+    # First call builds the table; second call must hit the module-level
+    # cache (same key) and not rebuild — assert by checking the cache has
+    # exactly one entry for this roster + build-param combo.
     policy.decision(roster, None, MAX_TEAM_SIZE, MAX_PKM_MOVES, N_ACTIVE)
     policy.decision(roster, None, MAX_TEAM_SIZE, MAX_PKM_MOVES, N_ACTIVE)
-    assert len(policy._cache) == 1
+    assert len(mt._MATCHUP_TABLE_CACHE) == 1
 
 
 def test_decision_returns_max_team_size_entries() -> None:
