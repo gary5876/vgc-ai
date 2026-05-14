@@ -12,6 +12,7 @@ from vgc2.battle_engine.modifiers import Nature
 from vgc2.util.generator import gen_move_set, gen_pkm_roster
 
 from vgc_ai.policies.teambuild import (
+    MatchupTableTeamBuildPolicy,
     MetaUsageTeamBuildPolicy,
     VgcAiTeamBuildPolicy,
     _move_priority,
@@ -34,8 +35,39 @@ def _make_roster(seed: int = 42, n_species: int = 12, n_moves: int = 20):
     return move_set, roster
 
 
-def test_alias_points_to_concrete_policy() -> None:
-    assert VgcAiTeamBuildPolicy is MetaUsageTeamBuildPolicy
+def test_alias_points_to_matchup_table_default() -> None:
+    assert VgcAiTeamBuildPolicy is MatchupTableTeamBuildPolicy
+
+
+def test_matchup_decision_returns_max_team_size_entries() -> None:
+    _, roster = _make_roster(n_species=8)
+    policy = MatchupTableTeamBuildPolicy(n_battles_per_pair=2)
+    cmd = policy.decision(roster, None, MAX_TEAM_SIZE, MAX_PKM_MOVES, N_ACTIVE)
+    assert len(cmd) == MAX_TEAM_SIZE
+
+
+def test_matchup_species_indices_unique_and_in_range() -> None:
+    _, roster = _make_roster(n_species=8)
+    policy = MatchupTableTeamBuildPolicy(n_battles_per_pair=2)
+    cmd = policy.decision(roster, None, MAX_TEAM_SIZE, MAX_PKM_MOVES, N_ACTIVE)
+    ids = [entry[0] for entry in cmd]
+    assert len(set(ids)) == len(ids)
+    assert all(0 <= i < len(roster) for i in ids)
+
+
+def test_matchup_handles_empty_roster() -> None:
+    policy = MatchupTableTeamBuildPolicy(n_battles_per_pair=2)
+    assert policy.decision([], None, MAX_TEAM_SIZE, MAX_PKM_MOVES, N_ACTIVE) == []
+
+
+def test_matchup_table_cached_across_calls() -> None:
+    _, roster = _make_roster(n_species=6)
+    policy = MatchupTableTeamBuildPolicy(n_battles_per_pair=2)
+    # First call builds the table; second call must hit the cache (same key)
+    # and not rebuild — assert by checking the internal dict has exactly one entry.
+    policy.decision(roster, None, MAX_TEAM_SIZE, MAX_PKM_MOVES, N_ACTIVE)
+    policy.decision(roster, None, MAX_TEAM_SIZE, MAX_PKM_MOVES, N_ACTIVE)
+    assert len(policy._cache) == 1
 
 
 def test_decision_returns_max_team_size_entries() -> None:
