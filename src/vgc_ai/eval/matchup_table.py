@@ -197,3 +197,185 @@ def clear_matchup_table_cache() -> None:
     """Reset the module-level cache. Test-only helper; production code should
     not need to invalidate."""
     _MATCHUP_TABLE_CACHE.clear()
+    _DOUBLES_MATCHUP_TABLE_CACHE.clear()
+
+
+# ---- Doubles matchup table (n_active=2, paired-with-teammate sampling) ----
+#
+# The singleton table above approximates 1v1 outcomes; it's the right signal
+# for team build (no opponent lead info yet). Selection happens AFTER teams
+# are built, so it's about LEAD PAIRS — which means singleton scores
+# systematically underrate species that depend on a teammate's presence
+# (e.g. one ally setting up weather while the other sweeps). A doubles
+# matchup table samples paired battles instead.
+#
+# Cell M[i][j] = mean win-rate of species i (paired with a *sampled*
+# teammate from the roster) vs species j (paired with a sampled teammate),
+# at n_active=2. Teammate sampling is RNG-seeded for reproducibility.
+
+
+def _build_doubles_team(lead: PokemonSpecies, teammate: PokemonSpecies, max_pkm_moves: int) -> Team:
+    """Two-mon team: lead first, teammate second."""
+    return Team(
+        [
+            Pokemon(
+                species=lead,
+                move_indexes=_top_moves(lead, max_pkm_moves),
+                level=100,
+                evs=_DEFAULT_EVS,
+                ivs=_DEFAULT_IVS,
+                nature=_DEFAULT_NATURE,
+            ),
+            Pokemon(
+                species=teammate,
+                move_indexes=_top_moves(teammate, max_pkm_moves),
+                level=100,
+                evs=_DEFAULT_EVS,
+                ivs=_DEFAULT_IVS,
+                nature=_DEFAULT_NATURE,
+            ),
+        ]
+    )
+
+
+def _one_doubles_battle(
+    lead_a: PokemonSpecies,
+    teammate_a: PokemonSpecies,
+    lead_b: PokemonSpecies,
+    teammate_b: PokemonSpecies,
+    max_pkm_moves: int,
+    params: BattleRuleParam,
+    policy_factory: type[BattlePolicy],
+) -> int:
+    """Run a single 2v2 doubles battle. Returns 0 if A wins, 1 if B wins."""
+    team_a = _build_doubles_team(lead_a, teammate_a, max_pkm_moves)
+    team_b = _build_doubles_team(lead_b, teammate_b, max_pkm_moves)
+    teams = (team_a, team_b)
+    label_teams(teams)
+    team_view = TeamView(team_a), TeamView(team_b)
+    state = State(get_battle_teams(teams, n_active=2))
+    state_view = (
+        StateView(state, 0, team_view),
+        StateView(state, 1, team_view),
+    )
+    engine = BattleEngine(state, debug=False)
+
+    a = policy_factory()
+    b = policy_factory()
+    a.set_params(params)
+    b.set_params(params)
+    winner: int = run_battle(engine, (a, b), team_view, state_view, client=None)
+    return winner
+
+
+def _sample_teammate(rng: np.random.Generator, n: int, exclude: set[int]) -> int:
+    """Pick a random index in [0, n) not in ``exclude``. ``exclude`` has at most 2 entries
+    (the two leads), so rejection sampling is fine."""
+    while True:
+        idx = int(rng.integers(0, n))
+        if idx not in exclude:
+            return idx
+
+
+def _doubles_pair_winrate(
+    roster: Roster,
+    i: int,
+    j: int,
+    n_battles_per_pair: int,
+    max_pkm_moves: int,
+    params: BattleRuleParam,
+    policy_factory: type[BattlePolicy],
+    rng: np.random.Generator,
+) -> float:
+    """Mean win-rate of species i (paired with sampled teammates) vs species j."""
+    n = len(roster)
+    wins_i = 0
+    decided = 0
+    for _ in range(n_battles_per_pair):
+        teammate_a_idx = _sample_teammate(rng, n, {i, j})
+        teammate_b_idx = _sample_teammate(rng, n, {i, j})
+        winner = _one_doubles_battle(
+            roster[i],
+            roster[teammate_a_idx],
+            roster[j],
+            roster[teammate_b_idx],
+            max_pkm_moves,
+            params,
+            policy_factory,
+        )
+        if winner == 0:
+            wins_i += 1
+            decided += 1
+        elif winner == 1:
+            decided += 1
+    if decided == 0:
+        return 0.5
+    return wins_i / decided
+
+
+def build_doubles_matchup_table(
+    roster: Roster,
+    *,
+    n_battles_per_pair: int = 3,
+    max_pkm_moves: int = 4,
+    params: BattleRuleParam | None = None,
+    policy_factory: type[BattlePolicy] = GreedyBattlePolicy,
+    seed: int = 42,
+) -> npt.NDArray[np.float64]:
+    """Compute an ``N x N`` doubles matchup matrix.
+
+    ``M[i][j]`` is species i's win-rate as a paired lead vs species j as a
+    paired lead, averaged over ``n_battles_per_pair`` battles with teammates
+    sampled (seeded by ``seed``) from the roster. Battle outcomes themselves
+    are stochastic — ``BattleEngine`` uses its own internal RNG that we
+    don't seed — so the table varies modestly across builds. Within a
+    single championship the cache pins the table to one realization.
+
+    Symmetric pairs are computed once; the diagonal is 0.5 by convention.
+
+    Default ``n_battles_per_pair=3`` keeps the precompute reasonable (~18s
+    for a 30-species roster, vs ~5s for the singleton table at
+    ``n_battles_per_pair=10``). Once per championship.
+    """
+    p = params or BattleRuleParam()
+    n = len(roster)
+    rng = np.random.default_rng(seed)
+    table = np.full((n, n), 0.5, dtype=np.float64)
+    for i in range(n):
+        for j in range(i + 1, n):
+            wr = _doubles_pair_winrate(
+                roster, i, j, n_battles_per_pair, max_pkm_moves, p, policy_factory, rng
+            )
+            table[i][j] = wr
+            table[j][i] = 1.0 - wr
+    return table
+
+
+_DOUBLES_MATCHUP_TABLE_CACHE: dict[tuple[int, ...], npt.NDArray[np.float64]] = {}
+
+
+def get_or_build_doubles_matchup_table(
+    roster: Roster,
+    *,
+    n_battles_per_pair: int = 3,
+    max_pkm_moves: int = 4,
+    params: BattleRuleParam | None = None,
+    policy_factory: type[BattlePolicy] = GreedyBattlePolicy,
+    seed: int = 42,
+) -> npt.NDArray[np.float64]:
+    """Return the cached doubles matchup table for ``roster``.
+
+    Separate cache from ``get_or_build_matchup_table`` because the doubles
+    table is meaningfully different data, not just a different precision.
+    """
+    key = (*roster_cache_key(roster), n_battles_per_pair, max_pkm_moves, seed)
+    if key not in _DOUBLES_MATCHUP_TABLE_CACHE:
+        _DOUBLES_MATCHUP_TABLE_CACHE[key] = build_doubles_matchup_table(
+            roster,
+            n_battles_per_pair=n_battles_per_pair,
+            max_pkm_moves=max_pkm_moves,
+            params=params,
+            policy_factory=policy_factory,
+            seed=seed,
+        )
+    return _DOUBLES_MATCHUP_TABLE_CACHE[key]
