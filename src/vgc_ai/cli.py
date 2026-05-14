@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from functools import partial
 
 from vgc2.agent.battle import GreedyBattlePolicy, RandomBattlePolicy, TreeSearchBattlePolicy
 
@@ -12,11 +13,16 @@ from vgc_ai.eval.duel import duel
 from vgc_ai.policies.heuristic_det import HeuristicDetBattlePolicy
 from vgc_ai.policies.tabular_mc import TabularMCBattlePolicy
 
+# tabular_mc auto-loads ``models/tabular_mc.json`` if present (the file is
+# gitignored — produced by ``scripts/train_tabular_mc.py``); when absent, the
+# constructor still returns a zero-knowledge policy that plays uniformly at
+# random over legal joint actions, so unit tests and bench rounds without a
+# trained checkpoint continue to work.
 POLICIES = {
     "random": RandomBattlePolicy,
     "greedy": GreedyBattlePolicy,
     "tree": TreeSearchBattlePolicy,
-    "tabular_mc": TabularMCBattlePolicy,
+    "tabular_mc": partial(TabularMCBattlePolicy, model_path="models/tabular_mc.json"),
     "heuristic_det": HeuristicDetBattlePolicy,
 }
 

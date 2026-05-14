@@ -1,13 +1,8 @@
-"""Tabular first-visit Monte Carlo battle policy (skeleton).
+"""Tabular first-visit Monte Carlo battle policy.
 
 Follows the structure of AurelianTactics 2024 (3rd place): a collapsed
-~11-dim integer state encoding, a state→action-values table backed by a plain
-``dict``, and a first-visit MC ``learn`` step that averages observed returns.
-
-This module ships the **skeleton only**. The table starts empty; an untrained
-instance falls back to uniform-random behaviour over the legal joint actions
-returned by :func:`vgc2.agent.battle.get_actions`. Training (trajectory
-collection + reward shaping) is a follow-up task.
+~11-dim integer state encoding plus a state→action-values table backed by a
+plain ``dict``, learned via first-visit MC over completed episodes.
 
 State encoding (11 dims for doubles, ``n_active=2``):
 
@@ -19,31 +14,55 @@ State encoding (11 dims for doubles, ``n_active=2``):
     9     side 1 non-fainted Pokemon count (0..team_size)
     10    Weather enum int (0..4)
 
-The encoding is a deliberately lossy projection — many actual battle states
-collapse to the same key. That is the point of tabular MC: the table generalises
-across positions that share gross features (HP totals, status, board count).
+Action keys are **canonical** rather than positional. The legacy positional
+``action_idx`` (index into ``get_actions``' cartesian product) was unstable
+across turns: PP-decay, disabling, and reserve fainting all reorder
+``battling_moves`` and ``reserve``, so the same ``action_idx`` denotes
+different commands across visits to the same ``state_key`` — which conflates
+incompatible returns under first-visit MC.
+
+The canonical per-slot command is ``(kind, payload)`` where:
+
+* ``kind = 0`` → MOVE; payload is the move's stable signature
+  ``(pkm_type, base_power, accuracy_pct, category)``
+  (vgc2 sets ``move.constants.id == -1`` for procedurally-generated
+  moves, so the spec's ``id`` path is never taken — the derived signature
+  is the canonical id in practice).
+* ``kind = 1`` → SWITCH; payload is the destination Pokemon's stable
+  signature ``(types_tuple, base_stats_tuple)`` derived from its species
+  (``species.id == -1`` likewise).
+
+The joint action key is the tuple of per-slot canonical commands.
 """
 
 from __future__ import annotations
 
 import json
 import random
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
 from vgc2.agent import BattlePolicy
 from vgc2.agent.battle import get_actions
 from vgc2.battle_engine import BattleCommand, State
+from vgc2.battle_engine.team import BattlingTeam
 from vgc2.battle_engine.view import TeamView
 
 StateKey = tuple[int, ...]
 """Encoded state — a fixed-length integer tuple, hashable for dict use."""
+
+ActionKey = tuple[Any, ...]
+"""Canonical joint action — a tuple of per-slot ``(kind, payload)`` tuples."""
 
 _HP_BUCKETS = 4
 _MAX_ACTIVE_SLOTS = 2
 _ENCODING_LEN = 4 * _MAX_ACTIVE_SLOTS + 3
 """4 features per active slot (hp,hp,status,status across both sides)
 + alive_count_a + alive_count_b + weather."""
+
+_KIND_MOVE = 0
+_KIND_SWITCH = 1
 
 
 def _hp_bucket(hp: int, max_hp: int) -> int:
@@ -68,12 +87,7 @@ def _alive_count(side: Any) -> int:
 
 
 def encode_state(state: State) -> StateKey:
-    """Project a vgc2 ``State`` into the integer tuple used as a Q-table key.
-
-    Always emits ``_ENCODING_LEN`` ints. Missing active slots (1v0 or 0v0
-    edge configurations) are encoded as -1 so they hash to a distinct bucket
-    rather than colliding with "full HP" or "no status".
-    """
+    """Project a vgc2 ``State`` into the integer tuple used as a Q-table key."""
     side0, side1 = state.sides[0], state.sides[1]
     feats: list[int] = []
     for side in (side0, side1):
@@ -97,21 +111,108 @@ def encode_state(state: State) -> StateKey:
     return tuple(feats)
 
 
+def _move_signature(move: Any) -> tuple[int, ...]:
+    """Stable id for a move — ``move.constants.id`` if set, else derived signature."""
+    mc = move.constants
+    move_id = getattr(mc, "id", -1)
+    if move_id is not None and move_id != -1:
+        return (int(move_id),)
+    pkm_type = mc.pkm_type
+    category = mc.category
+    return (
+        int(getattr(pkm_type, "value", pkm_type)),
+        int(mc.base_power),
+        round(mc.accuracy * 100),
+        int(getattr(category, "value", category)),
+    )
+
+
+def _pkm_signature(pkm: Any) -> tuple[int, ...]:
+    """Stable id for a Pokemon — ``species.id`` if set, else derived signature.
+
+    The vgc2 generator emits fictional Pokemon with ``species.id == -1``, so
+    in practice the fallback path is always taken. We hash on ``(types,
+    base_stats)``: both invariant across the battle, and together they
+    uniquely identify the species in any reasonable randomly-generated team.
+    """
+    pc = pkm.constants
+    species = pc.species
+    species_id = getattr(species, "id", -1)
+    if species_id is not None and species_id != -1:
+        return (int(species_id),)
+    types_tuple = tuple(int(getattr(t, "value", t)) for t in species.types)
+    base_stats = tuple(int(s) for s in species.base_stats)
+    return types_tuple + base_stats
+
+
+def canonicalize_action(
+    joint: Iterable[BattleCommand],
+    team_pair: tuple[BattlingTeam, BattlingTeam],
+) -> ActionKey:
+    """Map a per-slot list of ``(move_idx_or_-1, target_idx)`` commands to a
+    canonical key whose components depend on move/Pokemon identity, not on
+    positional indices into volatile lists.
+    """
+    attackers = list(team_pair[0].active)
+    reserve = list(team_pair[0].reserve)
+    canon: list[tuple[Any, ...]] = []
+    for slot, cmd in enumerate(joint):
+        move_idx, target_idx = cmd
+        if move_idx == -1:
+            if 0 <= target_idx < len(reserve):
+                canon.append((_KIND_SWITCH, _pkm_signature(reserve[target_idx])))
+            else:
+                canon.append((_KIND_SWITCH, ()))
+        else:
+            if slot < len(attackers):
+                moves = attackers[slot].battling_moves
+                if 0 <= move_idx < len(moves):
+                    canon.append((_KIND_MOVE, _move_signature(moves[move_idx])))
+                else:
+                    canon.append((_KIND_MOVE, ()))
+            else:
+                canon.append((_KIND_MOVE, ()))
+    return tuple(canon)
+
+
+def _action_key_to_json(key: ActionKey) -> str:
+    """Serialise an ActionKey to a JSON-string dict key."""
+    return json.dumps(key)
+
+
+def _action_key_from_json(s: str) -> ActionKey:
+    """Inverse of :func:`_action_key_to_json` — produces a hashable nested tuple."""
+
+    def _to_tuple(obj: Any) -> Any:
+        if isinstance(obj, list):
+            return tuple(_to_tuple(x) for x in obj)
+        return obj
+
+    parsed = json.loads(s)
+    result: ActionKey = _to_tuple(parsed)
+    return result
+
+
 class TabularMCBattlePolicy(BattlePolicy):  # type: ignore[misc]  # vgc2 is untyped; BattlePolicy resolves as Any under --strict
     """First-visit Monte Carlo over a collapsed integer state encoding.
 
-    The table is empty until :meth:`learn` is called; until then,
-    :meth:`decision` returns a uniformly-random legal joint action from
-    :func:`get_actions`. After training, the policy picks the joint action
-    with the highest visited mean return for the encoded state, falling back
-    to random when the state is unseen or no candidate joint action has been
-    visited.
+    The Q-table is empty until :meth:`learn` is called or :meth:`load`
+    deserialises a checkpoint. Until then, :meth:`decision` returns a
+    uniformly-random legal joint action from :func:`get_actions`. After
+    training, the policy picks the joint action whose canonical key has the
+    highest visited mean return for the encoded state, falling back to random
+    when the state is unseen or no legal action's canonical key has been
+    visited from this state.
     """
 
-    def __init__(self, rng_seed: int | None = None) -> None:
-        self._q: dict[StateKey, list[float]] = {}
-        self._n: dict[StateKey, list[int]] = {}
+    def __init__(self, rng_seed: int | None = None, model_path: str | Path | None = None) -> None:
+        self._q: dict[StateKey, dict[ActionKey, float]] = {}
+        self._n: dict[StateKey, dict[ActionKey, int]] = {}
         self._rng = random.Random(rng_seed)
+        if model_path is not None:
+            path = Path(model_path)
+            if path.exists():
+                self.load(path)
 
     def decision(
         self,
@@ -123,27 +224,30 @@ class TabularMCBattlePolicy(BattlePolicy):  # type: ignore[misc]  # vgc2 is unty
         if not joint_actions:
             return [(0, 0)] * len(state.sides[0].team.active)
 
-        key = encode_state(state)
-        q_row = self._q.get(key)
-        n_row = self._n.get(key)
+        s_key = encode_state(state)
+        q_row = self._q.get(s_key)
+        n_row = self._n.get(s_key)
         best_idx = -1
         best_val = float("-inf")
         if q_row is not None and n_row is not None:
-            limit = min(len(joint_actions), len(q_row))
-            for idx in range(limit):
-                if n_row[idx] > 0 and q_row[idx] > best_val:
-                    best_val = q_row[idx]
-                    best_idx = idx
+            for idx, joint in enumerate(joint_actions):
+                a_key = canonicalize_action(joint, team_pair)
+                visits = n_row.get(a_key, 0)
+                if visits > 0:
+                    val = q_row.get(a_key, 0.0)
+                    if val > best_val:
+                        best_val = val
+                        best_idx = idx
         if best_idx < 0:
             best_idx = self._rng.randrange(len(joint_actions))
         return list(joint_actions[best_idx])
 
-    def learn(self, trajectories: list[list[tuple[StateKey, int, float]]]) -> None:
+    def learn(self, trajectories: list[list[tuple[StateKey, ActionKey, float]]]) -> None:
         """First-visit MC update.
 
         ``trajectories`` is a list of episodes; each episode is a list of
-        ``(state_key, action_idx, step_reward)`` tuples in temporal order.
-        For each unique ``(state_key, action_idx)`` first-visited in an
+        ``(state_key, action_key, step_reward)`` tuples in temporal order.
+        For each unique ``(state_key, action_key)`` first-visited in an
         episode, the table mean is updated incrementally with the
         episode's terminal return (sum of step rewards).
         """
@@ -151,52 +255,79 @@ class TabularMCBattlePolicy(BattlePolicy):  # type: ignore[misc]  # vgc2 is unty
             if not episode:
                 continue
             g = sum(step[2] for step in episode)
-            seen: set[tuple[StateKey, int]] = set()
-            for s_key, a_idx, _r in episode:
-                if (s_key, a_idx) in seen:
+            seen: set[tuple[StateKey, ActionKey]] = set()
+            for s_key, a_key, _r in episode:
+                if (s_key, a_key) in seen:
                     continue
-                seen.add((s_key, a_idx))
-                self._update(s_key, a_idx, g)
+                seen.add((s_key, a_key))
+                self._update(s_key, a_key, g)
 
-    def _update(self, s_key: StateKey, a_idx: int, g: float) -> None:
-        if a_idx < 0:
-            return
+    def _update(self, s_key: StateKey, a_key: ActionKey, g: float) -> None:
         q_row = self._q.get(s_key)
         n_row = self._n.get(s_key)
         if q_row is None or n_row is None:
-            q_row = []
-            n_row = []
+            q_row = {}
+            n_row = {}
             self._q[s_key] = q_row
             self._n[s_key] = n_row
-        while len(q_row) <= a_idx:
-            q_row.append(0.0)
-            n_row.append(0)
-        n_row[a_idx] += 1
+        new_n = n_row.get(a_key, 0) + 1
+        n_row[a_key] = new_n
+        prev_q = q_row.get(a_key, 0.0)
         # incremental mean: q_new = q_old + (g - q_old) / n
-        q_row[a_idx] += (g - q_row[a_idx]) / n_row[a_idx]
+        q_row[a_key] = prev_q + (g - prev_q) / new_n
+
+    def num_state_action_keys(self) -> int:
+        """Total number of distinct (state_key, action_key) pairs in the table.
+
+        Used by training/diagnostic scripts to track table growth and to
+        verify that canonicalization actually reduces key explosion versus
+        the legacy positional-index baseline.
+        """
+        return sum(len(row) for row in self._n.values())
 
     def save(self, path: str | Path) -> None:
         """Serialise the table to JSON.
 
-        Tuple keys are encoded as comma-separated strings because JSON only
-        supports string keys at the object level.
+        State keys (int tuples) become comma-separated strings; action keys
+        (nested tuples) become JSON-encoded strings — both reversed by
+        :meth:`load`.
         """
         payload = {
-            "q": {",".join(str(i) for i in k): v for k, v in self._q.items()},
-            "n": {",".join(str(i) for i in k): v for k, v in self._n.items()},
+            "q": {
+                ",".join(str(i) for i in s_key): {
+                    _action_key_to_json(a_key): v for a_key, v in row.items()
+                }
+                for s_key, row in self._q.items()
+            },
+            "n": {
+                ",".join(str(i) for i in s_key): {
+                    _action_key_to_json(a_key): v for a_key, v in row.items()
+                }
+                for s_key, row in self._n.items()
+            },
         }
         Path(path).write_text(json.dumps(payload))
 
     def load(self, path: str | Path) -> None:
         payload = json.loads(Path(path).read_text())
         self._q = {
-            tuple(int(x) for x in k.split(",")): [float(v) for v in row]
-            for k, row in payload.get("q", {}).items()
+            tuple(int(x) for x in s_key.split(",")): {
+                _action_key_from_json(a_key): float(v) for a_key, v in row.items()
+            }
+            for s_key, row in payload.get("q", {}).items()
         }
         self._n = {
-            tuple(int(x) for x in k.split(",")): [int(v) for v in row]
-            for k, row in payload.get("n", {}).items()
+            tuple(int(x) for x in s_key.split(",")): {
+                _action_key_from_json(a_key): int(v) for a_key, v in row.items()
+            }
+            for s_key, row in payload.get("n", {}).items()
         }
 
 
-__all__ = ["StateKey", "TabularMCBattlePolicy", "encode_state"]
+__all__ = [
+    "ActionKey",
+    "StateKey",
+    "TabularMCBattlePolicy",
+    "canonicalize_action",
+    "encode_state",
+]
