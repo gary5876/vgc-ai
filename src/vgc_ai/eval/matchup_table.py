@@ -156,3 +156,44 @@ def roster_cache_key(roster: Roster) -> tuple[int, ...]:
     list of species objects, even if they look superficially similar.
     """
     return tuple(id(s) for s in roster)
+
+
+# Module-level cache shared across policies (team-build + selection). Keyed on
+# roster identity AND build parameters; both team-build and selection consult
+# this rather than each holding their own table. The cache is intentionally
+# unbounded — a fresh Championship instance produces fresh species objects, so
+# the prior key's entries become unreachable and Python eventually collects
+# them.
+_MATCHUP_TABLE_CACHE: dict[tuple[int, ...], npt.NDArray[np.float64]] = {}
+
+
+def get_or_build_matchup_table(
+    roster: Roster,
+    *,
+    n_battles_per_pair: int = 5,
+    max_pkm_moves: int = 4,
+    params: BattleRuleParam | None = None,
+    policy_factory: type[BattlePolicy] = GreedyBattlePolicy,
+) -> npt.NDArray[np.float64]:
+    """Return the cached matchup table for ``roster``, building it on first call.
+
+    The cache key bundles the roster identity, ``n_battles_per_pair``, and
+    ``max_pkm_moves`` so tables built with different precision / move counts
+    don't collide.
+    """
+    key = (*roster_cache_key(roster), n_battles_per_pair, max_pkm_moves)
+    if key not in _MATCHUP_TABLE_CACHE:
+        _MATCHUP_TABLE_CACHE[key] = build_matchup_table(
+            roster,
+            n_battles_per_pair=n_battles_per_pair,
+            max_pkm_moves=max_pkm_moves,
+            params=params,
+            policy_factory=policy_factory,
+        )
+    return _MATCHUP_TABLE_CACHE[key]
+
+
+def clear_matchup_table_cache() -> None:
+    """Reset the module-level cache. Test-only helper; production code should
+    not need to invalidate."""
+    _MATCHUP_TABLE_CACHE.clear()

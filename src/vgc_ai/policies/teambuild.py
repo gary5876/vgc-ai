@@ -42,7 +42,7 @@ from vgc2.battle_engine.modifiers import Category, Nature, Stat
 from vgc2.battle_engine.move import Move
 from vgc2.battle_engine.pokemon import PokemonSpecies
 
-from vgc_ai.eval.matchup_table import build_matchup_table, roster_cache_key
+from vgc_ai.eval.matchup_table import get_or_build_matchup_table
 
 _DEFAULT_IVS: tuple[int, int, int, int, int, int] = (31, 31, 31, 31, 31, 31)
 _STAB_MULTIPLIER: float = 1.5
@@ -211,24 +211,13 @@ class MatchupTableTeamBuildPolicy(TeamBuildPolicy):  # type: ignore[misc]
     """Greedy team builder over a precomputed roster-x-roster matchup table.
 
     Falls back to ``MetaUsageTeamBuildPolicy``'s ranking when the roster is
-    empty or ``max_team_size`` is zero. Per-instance cache keyed by
-    ``roster_cache_key`` so each fresh championship pays the table-build cost
-    only once.
+    empty or ``max_team_size`` is zero. Uses the module-level matchup-table
+    cache in ``vgc_ai.eval.matchup_table`` so the table is shared with any
+    other policy (e.g. ``MatchupAwareSelectionPolicy``) that needs it.
     """
 
     def __init__(self, n_battles_per_pair: int = _MATCHUP_TABLE_N_PER_PAIR) -> None:
         self._n_battles_per_pair = n_battles_per_pair
-        self._cache: dict[tuple[int, ...], npt.NDArray[np.float64]] = {}
-
-    def _get_table(self, roster: Roster, max_pkm_moves: int) -> npt.NDArray[np.float64]:
-        key = (*roster_cache_key(roster), max_pkm_moves)
-        if key not in self._cache:
-            self._cache[key] = build_matchup_table(
-                roster,
-                n_battles_per_pair=self._n_battles_per_pair,
-                max_pkm_moves=max_pkm_moves,
-            )
-        return self._cache[key]
 
     def decision(
         self,
@@ -240,7 +229,11 @@ class MatchupTableTeamBuildPolicy(TeamBuildPolicy):  # type: ignore[misc]
     ) -> TeamBuildCommand:
         if not roster or max_team_size <= 0:
             return []
-        table = self._get_table(roster, max_pkm_moves)
+        table = get_or_build_matchup_table(
+            roster,
+            n_battles_per_pair=self._n_battles_per_pair,
+            max_pkm_moves=max_pkm_moves,
+        )
         picks = _greedy_coverage_picks(table, max_team_size)
         return _build_team_command(roster, picks, max_pkm_moves)
 
