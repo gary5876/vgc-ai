@@ -33,13 +33,19 @@ from vgc2.util.generator import gen_move_set, gen_pkm_roster
 from vgc_ai.competitor import VgcAiCompetitor
 from vgc_ai.policies.battle import VgcAiBattlePolicy
 from vgc_ai.policies.selection import VgcAiSelectionPolicy
-from vgc_ai.policies.teambuild import MetaUsageTeamBuildPolicy
+from vgc_ai.policies.teambuild import (
+    MatchupTableTeamBuildPolicy,
+    MetaUsageTeamBuildPolicy,
+    MinimaxTeamBuildPolicy,
+)
 
 MIN_ELO_DELTA = 50.0
 
 CONTROL_TEAMBUILDERS: dict[str, type[TeamBuildPolicy]] = {
     "random": RandomTeamBuildPolicy,
     "metausage": MetaUsageTeamBuildPolicy,
+    "matchup_table": MatchupTableTeamBuildPolicy,
+    "minimax": MinimaxTeamBuildPolicy,
 }
 
 
@@ -169,7 +175,7 @@ def main(argv: list[str] | None = None) -> int:
         "--control",
         choices=sorted(CONTROL_TEAMBUILDERS.keys()),
         default="random",
-        help="Control's team-build policy. 'random' is the prior baseline; 'metausage' is the head-to-head A/B.",
+        help="Control's team-build policy. 'random' is the framework baseline; 'metausage', 'matchup_table', 'minimax' are head-to-head A/Bs vs prior defaults.",
     )
     p.add_argument(
         "--min-elo-delta",
