@@ -238,10 +238,120 @@ class MatchupTableTeamBuildPolicy(TeamBuildPolicy):  # type: ignore[misc]
         return _build_team_command(roster, picks, max_pkm_moves)
 
 
-VgcAiTeamBuildPolicy = MatchupTableTeamBuildPolicy
+def _solve_minimax_policy(table: npt.NDArray[np.float64]) -> npt.NDArray[np.float64]:
+    """Solve the row player's max-min Nash policy over a zero-sum payoff matrix.
+
+    ``table[i][j]`` is row i's win-rate vs column j (our matchup table is in
+    this form). Returns the equilibrium mixing distribution ``p`` of length
+    ``n``, where ``p[i]`` is the optimal probability of picking row i.
+
+    Algorithm (standard zero-sum LP, identical in shape to Reis's
+    ``vgc-agents/teambuilders.py:get_policy``):
+
+        variables x = [v, p_0, ..., p_{n-1}]
+        minimize   -v             (i.e. maximize the worst-case payoff)
+        subject to v - p^T M[:, j] <= 0   for each column j
+                   sum(p) = 1
+                   p_i >= 0,  v unbounded
+
+    Falls back to a uniform distribution if scipy reports the LP infeasible
+    or the solver fails (defensive — shouldn't happen for a finite,
+    well-formed matchup table).
+    """
+    from scipy.optimize import linprog
+
+    n = table.shape[0]
+    if n == 0:
+        return np.zeros(0, dtype=np.float64)
+
+    c = np.zeros(n + 1, dtype=np.float64)
+    c[0] = -1.0  # minimize -v == maximize v
+
+    # A_ub: row j is [+1, -M[0][j], -M[1][j], ...]; v - sum(p_i * M[i][j]) <= 0.
+    a_ub = np.zeros((n, n + 1), dtype=np.float64)
+    a_ub[:, 0] = 1.0
+    a_ub[:, 1:] = -table.T
+    b_ub = np.zeros(n, dtype=np.float64)
+
+    a_eq = np.zeros((1, n + 1), dtype=np.float64)
+    a_eq[0, 1:] = 1.0
+    b_eq = np.array([1.0])
+
+    bounds: list[tuple[float | None, float | None]] = [(None, None)] + [(0.0, None)] * n
+
+    result = linprog(c, A_ub=a_ub, b_ub=b_ub, A_eq=a_eq, b_eq=b_eq, bounds=bounds)
+    if not result.success:
+        return np.full(n, 1.0 / n, dtype=np.float64)
+    p: npt.NDArray[np.float64] = np.asarray(result.x[1:], dtype=np.float64)
+    p = np.clip(p, 0.0, None)
+    s = float(p.sum())
+    if s <= 0.0:
+        return np.full(n, 1.0 / n, dtype=np.float64)
+    return p / s
+
+
+def _minimax_picks(table: npt.NDArray[np.float64], max_team_size: int) -> list[int]:
+    """Pick the top ``max_team_size`` species by Nash equilibrium mass.
+
+    Ties broken by descending mean row (raw matchup strength), then by
+    roster index. Pure-deterministic — we treat the LP weights as a
+    *ranking* over which species to bring, not as a sampling distribution
+    for an individual roll. Random sampling would inject per-call variance
+    that would hurt later cache lookups and is unnecessary for a team-of-N
+    pre-selection problem.
+    """
+    n = table.shape[0]
+    if n == 0 or max_team_size <= 0:
+        return []
+    p = _solve_minimax_policy(table)
+    row_mean = table.mean(axis=1)
+    order = sorted(range(n), key=lambda i: (-p[i], -row_mean[i], i))
+    return order[:max_team_size]
+
+
+class MinimaxTeamBuildPolicy(TeamBuildPolicy):  # type: ignore[misc]
+    """LP-minimax team builder over the singleton matchup table.
+
+    Solves a zero-sum-game LP for the Nash equilibrium mixing distribution
+    over species, then deterministically picks the top-``max_team_size``
+    species by equilibrium mass. This is more robust than
+    ``MatchupTableTeamBuildPolicy``'s greedy coverage when the roster has
+    a non-trivial rock-paper-scissors structure: the LP finds a portfolio
+    that's hard to counter, where greedy coverage can over-commit to one
+    branch of the matchup graph.
+
+    Uses the same module-level singleton matchup table as
+    ``MatchupTableTeamBuildPolicy``, so the precompute cost (~5s for a
+    30-species roster) is shared, not doubled.
+    """
+
+    def __init__(self, n_battles_per_pair: int = _MATCHUP_TABLE_N_PER_PAIR) -> None:
+        self._n_battles_per_pair = n_battles_per_pair
+
+    def decision(
+        self,
+        roster: Roster,
+        meta: Meta | None,
+        max_team_size: int,
+        max_pkm_moves: int,
+        n_active: int,
+    ) -> TeamBuildCommand:
+        if not roster or max_team_size <= 0:
+            return []
+        table = get_or_build_matchup_table(
+            roster,
+            n_battles_per_pair=self._n_battles_per_pair,
+            max_pkm_moves=max_pkm_moves,
+        )
+        picks = _minimax_picks(table, max_team_size)
+        return _build_team_command(roster, picks, max_pkm_moves)
+
+
+VgcAiTeamBuildPolicy = MinimaxTeamBuildPolicy
 
 __all__ = [
     "MatchupTableTeamBuildPolicy",
     "MetaUsageTeamBuildPolicy",
+    "MinimaxTeamBuildPolicy",
     "VgcAiTeamBuildPolicy",
 ]

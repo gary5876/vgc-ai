@@ -3,7 +3,7 @@
 from vgc_ai.competitor import VgcAiCompetitor
 from vgc_ai.policies.heuristic_det import HeuristicDetBattlePolicy
 from vgc_ai.policies.selection import MatchupAwareSelectionPolicy
-from vgc_ai.policies.teambuild import MatchupTableTeamBuildPolicy
+from vgc_ai.policies.teambuild import MinimaxTeamBuildPolicy
 
 
 def test_default_name() -> None:
@@ -18,4 +18,4 @@ def test_policies_wired_to_expected_baselines() -> None:
     c = VgcAiCompetitor()
     assert isinstance(c.battlepolicy, HeuristicDetBattlePolicy)
     assert isinstance(c.selectionpolicy, MatchupAwareSelectionPolicy)
-    assert isinstance(c.teambuildpolicy, MatchupTableTeamBuildPolicy)
+    assert isinstance(c.teambuildpolicy, MinimaxTeamBuildPolicy)

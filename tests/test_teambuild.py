@@ -14,10 +14,12 @@ from vgc2.util.generator import gen_move_set, gen_pkm_roster
 from vgc_ai.policies.teambuild import (
     MatchupTableTeamBuildPolicy,
     MetaUsageTeamBuildPolicy,
+    MinimaxTeamBuildPolicy,
     VgcAiTeamBuildPolicy,
     _move_priority,
     _optimal_evs,
     _optimal_nature,
+    _solve_minimax_policy,
     _species_priority,
     _species_role,
 )
@@ -38,8 +40,8 @@ def _make_roster(seed: int = 42, n_species: int = 12, n_moves: int = 20):
     return move_set, roster
 
 
-def test_alias_points_to_matchup_table_default() -> None:
-    assert VgcAiTeamBuildPolicy is MatchupTableTeamBuildPolicy
+def test_alias_points_to_minimax_default() -> None:
+    assert VgcAiTeamBuildPolicy is MinimaxTeamBuildPolicy
 
 
 def test_matchup_decision_returns_max_team_size_entries() -> None:
@@ -219,3 +221,54 @@ def test_move_priority_with_role_prefers_matching_category() -> None:
 
     scores = [scored(i) for i in role_priority]
     assert scores == sorted(scores, reverse=True)
+
+
+def test_solve_minimax_policy_returns_valid_distribution() -> None:
+    import numpy as np
+
+    # Simple 3x3 rock-paper-scissors-shaped table; uniform mixed should win.
+    table = np.array(
+        [
+            [0.5, 0.7, 0.3],
+            [0.3, 0.5, 0.7],
+            [0.7, 0.3, 0.5],
+        ],
+        dtype=np.float64,
+    )
+    p = _solve_minimax_policy(table)
+    assert p.shape == (3,)
+    assert np.isclose(p.sum(), 1.0)
+    assert (p >= 0).all()
+    # Uniform Nash for symmetric RPS-shaped game
+    assert np.allclose(p, [1 / 3, 1 / 3, 1 / 3], atol=1e-6)
+
+
+def test_solve_minimax_policy_concentrates_on_dominating_row() -> None:
+    import numpy as np
+
+    # Row 0 dominates rows 1 and 2 (beats every column more strongly).
+    table = np.array(
+        [
+            [0.5, 0.9, 0.9],
+            [0.1, 0.5, 0.5],
+            [0.1, 0.5, 0.5],
+        ],
+        dtype=np.float64,
+    )
+    p = _solve_minimax_policy(table)
+    assert p[0] > 0.99
+
+
+def test_minimax_team_build_picks_max_team_size_entries() -> None:
+    _, roster = _make_roster(n_species=8)
+    policy = MinimaxTeamBuildPolicy(n_battles_per_pair=2)
+    cmd = policy.decision(roster, None, MAX_TEAM_SIZE, MAX_PKM_MOVES, N_ACTIVE)
+    assert len(cmd) == MAX_TEAM_SIZE
+    ids = [entry[0] for entry in cmd]
+    assert len(set(ids)) == len(ids)
+    assert all(0 <= i < len(roster) for i in ids)
+
+
+def test_minimax_handles_empty_roster() -> None:
+    policy = MinimaxTeamBuildPolicy(n_battles_per_pair=2)
+    assert policy.decision([], None, MAX_TEAM_SIZE, MAX_PKM_MOVES, N_ACTIVE) == []
