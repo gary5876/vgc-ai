@@ -51,6 +51,7 @@ data/
 bench/leaderboard.csv
 bench/elo.csv
 bench/results/
+models/
 
 # Editors / IDEs
 .vscode/
