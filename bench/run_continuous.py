@@ -44,7 +44,7 @@ CSV_COLUMNS: list[str] = [
     "avg_turn_ms_b",
 ]
 SLOW_POLICIES: frozenset[str] = frozenset({"tree"})
-BASELINE_ORDER: tuple[str, ...] = ("greedy", "random")
+BASELINE_ORDER: tuple[str, ...] = ("heuristic_det", "greedy", "random")
 
 
 def migrate_schema() -> None:

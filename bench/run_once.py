@@ -95,7 +95,14 @@ def run_once(
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="bench.run_once")
     p.add_argument("--a", required=True, help=f"Policy A name (one of {sorted(POLICIES)})")
-    p.add_argument("--b", required=True, help="Policy B name")
+    p.add_argument(
+        "--b",
+        default="heuristic_det",
+        help=(
+            "Policy B name (default: heuristic_det — the strongest baseline certified "
+            "at the gate; pass --b greedy explicitly to measure against the prior baseline)."
+        ),
+    )
     p.add_argument("--n", type=int, default=100, help="Number of battles")
     p.add_argument("--team-size", type=int, default=4)
     p.add_argument("--n-active", type=int, default=2)
