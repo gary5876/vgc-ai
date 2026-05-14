@@ -10,6 +10,7 @@ from vgc2.agent.battle import GreedyBattlePolicy, RandomBattlePolicy, TreeSearch
 
 from vgc_ai.eval.duel import duel
 from vgc_ai.policies.heuristic_det import HeuristicDetBattlePolicy
+from vgc_ai.policies.heuristic_det_2ply import HeuristicDet2plyBattlePolicy
 from vgc_ai.policies.tabular_mc import TabularMCBattlePolicy
 
 POLICIES = {
@@ -18,6 +19,7 @@ POLICIES = {
     "tree": TreeSearchBattlePolicy,
     "tabular_mc": TabularMCBattlePolicy,
     "heuristic_det": HeuristicDetBattlePolicy,
+    "heuristic_det_2ply": HeuristicDet2plyBattlePolicy,
 }
 
 
