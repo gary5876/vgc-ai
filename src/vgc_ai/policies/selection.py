@@ -24,17 +24,21 @@ a member that's 2x weak with neutral offense scores -1.0. Ties broken by
 original index (stable).
 
 We don't model the opponent's selection — they choose simultaneously, so
-their leads are unknown. Averaging over their full team is the conservative
-substitute.
+their leads are unknown. Averaging over their full team is the
+conservative substitute.
 
-A matchup-table-based variant of this scoring (using actual simulated win
-rates from ``vgc_ai.eval.matchup_table``) was tried and benched as a
-regression vs the type-chart proxy (mean -90 ELO over 5 seeds x 10 epochs
-in a championship A/B). Likely cause: the matchup table is built from
-singleton ``n_active=1`` battles, so it doesn't capture the doubles lead
-positioning and double-targeting that actually drive selection outcomes;
-its noise + format mismatch swamps any signal gain. The type-chart proxy
-stays as the default.
+Negative results recorded (so future tuners don't repeat them):
+
+- Singleton (``n_active=1``) matchup table for scoring: -90 ELO mean over
+  5 seeds x 10 epochs vs this type-chart proxy (PR #18). Likely cause: the
+  singleton table doesn't capture doubles lead positioning.
+- Doubles (``n_active=2``, paired-with-sampled-teammate) matchup table:
+  -86 ELO mean over 5 seeds x 10 epochs (this PR's experiment). The
+  doubles signal is *also* dominated by championship-level ELO variance;
+  the smooth type-chart score outperforms the noisy simulated win rates
+  at all sample sizes we've tried. Next leverage on selection is
+  game-theoretic (LP-minimax over the doubles table for an opponent-
+  uncertainty-aware mixed strategy), not more pointwise scoring variants.
 """
 
 from __future__ import annotations
@@ -75,6 +79,11 @@ def _selection_score(my_pkm: Pokemon, opp_team: Team, params: BattleRuleParam) -
         defense += _best_offense_multiplier(opp, my_pkm, params)
     n = len(opp_team.members)
     return (offense - defense) / n
+
+
+# Public alias used by bench/run_selection_doubles_ab.py to import the
+# canonical scorer without depending on a private name.
+_type_chart_score = _selection_score
 
 
 class MatchupAwareSelectionPolicy(SelectionPolicy):  # type: ignore[misc]
