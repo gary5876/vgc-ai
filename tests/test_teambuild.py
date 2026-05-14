@@ -1,4 +1,4 @@
-"""Unit tests for ``MetaUsageTeamBuildPolicy``.
+"""Unit tests for ``MetaUsageTeamBuildPolicy`` and ``CoverageMetaTeamBuildPolicy``.
 
 Uses ``vgc2.util.generator.gen_pkm_roster`` + ``gen_move_set`` to fabricate a
 deterministic roster, and ``BasicMeta`` to provide / suppress usage data.
@@ -12,6 +12,7 @@ from vgc2.battle_engine.modifiers import Nature
 from vgc2.util.generator import gen_move_set, gen_pkm_roster
 
 from vgc_ai.policies.teambuild import (
+    CoverageMetaTeamBuildPolicy,
     MetaUsageTeamBuildPolicy,
     VgcAiTeamBuildPolicy,
     _move_priority,
@@ -34,8 +35,51 @@ def _make_roster(seed: int = 42, n_species: int = 12, n_moves: int = 20):
     return move_set, roster
 
 
-def test_alias_points_to_concrete_policy() -> None:
+def test_alias_remains_metausage() -> None:
     assert VgcAiTeamBuildPolicy is MetaUsageTeamBuildPolicy
+
+
+def test_coverage_decision_returns_max_team_size_entries() -> None:
+    _, roster = _make_roster()
+    policy = CoverageMetaTeamBuildPolicy()
+    cmd = policy.decision(roster, None, MAX_TEAM_SIZE, MAX_PKM_MOVES, N_ACTIVE)
+    assert len(cmd) == MAX_TEAM_SIZE
+
+
+def test_coverage_species_indices_unique_and_in_range() -> None:
+    _, roster = _make_roster()
+    policy = CoverageMetaTeamBuildPolicy()
+    cmd = policy.decision(roster, None, MAX_TEAM_SIZE, MAX_PKM_MOVES, N_ACTIVE)
+    ids = [entry[0] for entry in cmd]
+    assert len(set(ids)) == len(ids)
+    assert all(0 <= i < len(roster) for i in ids)
+
+
+def test_coverage_first_pick_matches_priority() -> None:
+    _, roster = _make_roster()
+    policy = CoverageMetaTeamBuildPolicy()
+    cmd = policy.decision(roster, None, MAX_TEAM_SIZE, MAX_PKM_MOVES, N_ACTIVE)
+    expected_first = _species_priority(roster, None)[0]
+    assert cmd[0][0] == expected_first
+
+
+def test_coverage_deterministic_across_calls() -> None:
+    _, roster = _make_roster()
+    policy = CoverageMetaTeamBuildPolicy()
+    a = policy.decision(roster, None, MAX_TEAM_SIZE, MAX_PKM_MOVES, N_ACTIVE)
+    b = policy.decision(roster, None, MAX_TEAM_SIZE, MAX_PKM_MOVES, N_ACTIVE)
+    assert a == b
+
+
+def test_coverage_handles_empty_roster() -> None:
+    policy = CoverageMetaTeamBuildPolicy()
+    assert policy.decision([], None, MAX_TEAM_SIZE, MAX_PKM_MOVES, N_ACTIVE) == []
+
+
+def test_coverage_handles_zero_team_size() -> None:
+    _, roster = _make_roster()
+    policy = CoverageMetaTeamBuildPolicy()
+    assert policy.decision(roster, None, 0, MAX_PKM_MOVES, N_ACTIVE) == []
 
 
 def test_decision_returns_max_team_size_entries() -> None:

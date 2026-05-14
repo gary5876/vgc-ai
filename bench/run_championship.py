@@ -3,11 +3,13 @@
 Drives ``vgc2.competition.ecosystem.Championship`` directly with two
 ``CompetitorManager`` instances — no ``ProxyCompetitor`` / socket protocol.
 One side is ``VgcAiCompetitor`` (our policies); the other side is a control
-competitor that uses the same battle/selection policies but the framework's
-``RandomTeamBuildPolicy`` so the team-build delta is the only differentiator.
+competitor that uses the same battle/selection policies but a
+parametrized team-build policy (``--control random|metausage``) so the
+team-build delta is the only differentiator.
 
-Acceptance gate: VgcAiCompetitor's final ELO must exceed the control's by at
-least ``MIN_ELO_DELTA``. Prints final ranking; exits 0 on pass, 1 on miss.
+Acceptance gate: VgcAiCompetitor's final ELO must exceed the control's by
+at least ``--min-elo-delta``. Prints final ranking; exits 0 on pass, 1 on
+miss.
 """
 
 from __future__ import annotations
@@ -21,6 +23,7 @@ from datetime import UTC, datetime
 from typing import TypedDict
 
 import numpy as np
+from vgc2.agent import TeamBuildPolicy
 from vgc2.agent.teambuild import RandomTeamBuildPolicy
 from vgc2.balance.meta import BasicMeta
 from vgc2.competition import Competitor, CompetitorManager
@@ -30,22 +33,28 @@ from vgc2.util.generator import gen_move_set, gen_pkm_roster
 from vgc_ai.competitor import VgcAiCompetitor
 from vgc_ai.policies.battle import VgcAiBattlePolicy
 from vgc_ai.policies.selection import VgcAiSelectionPolicy
+from vgc_ai.policies.teambuild import MetaUsageTeamBuildPolicy
 
 MIN_ELO_DELTA = 50.0
 
+CONTROL_TEAMBUILDERS: dict[str, type[TeamBuildPolicy]] = {
+    "random": RandomTeamBuildPolicy,
+    "metausage": MetaUsageTeamBuildPolicy,
+}
 
-class _RandomTeamBuildControlCompetitor(Competitor):  # type: ignore[misc]
-    """Same battle/selection as our submission; framework Random team builder.
+
+class _ControlCompetitor(Competitor):  # type: ignore[misc]
+    """Same battle/selection as our submission; parametrized team builder.
 
     Isolates the team-build policy as the single differentiator vs.
     ``VgcAiCompetitor`` in head-to-head championship play.
     """
 
-    def __init__(self, name: str = "control-randombuild") -> None:
+    def __init__(self, name: str, teambuild_policy: TeamBuildPolicy) -> None:
         self._name = name
         self._battle = VgcAiBattlePolicy()
         self._selection = VgcAiSelectionPolicy()
-        self._teambuild = RandomTeamBuildPolicy()
+        self._teambuild = teambuild_policy
 
     @property
     def battlepolicy(self):  # type: ignore[no-untyped-def]
@@ -73,6 +82,7 @@ class ChampionshipResult(TypedDict):
     max_pkm_moves: int
     roster_size: int
     n_moves: int
+    control: str
     vgc_ai_elo: int
     control_elo: int
     elo_delta: float
@@ -89,10 +99,13 @@ def run_championship(
     roster_size: int,
     n_moves: int,
     seed: int | None,
+    control: str = "random",
 ) -> ChampionshipResult:
     if seed is not None:
         np.random.seed(seed)
         random.seed(seed)
+    if control not in CONTROL_TEAMBUILDERS:
+        raise SystemExit(f"unknown control: {control!r} (known: {sorted(CONTROL_TEAMBUILDERS)})")
 
     move_set = gen_move_set(n_moves)
     roster = gen_pkm_roster(roster_size, move_set)
@@ -111,9 +124,12 @@ def run_championship(
         client=None,
     )
     ours = VgcAiCompetitor(name="vgc-ai")
-    control = _RandomTeamBuildControlCompetitor()
+    control_policy = CONTROL_TEAMBUILDERS[control]()
+    control_competitor = _ControlCompetitor(
+        name=f"control-{control}", teambuild_policy=control_policy
+    )
     cm_ours = CompetitorManager(ours)
-    cm_ctrl = CompetitorManager(control)
+    cm_ctrl = CompetitorManager(control_competitor)
     championship.register(cm_ours)
     championship.register(cm_ctrl)
 
@@ -130,6 +146,7 @@ def run_championship(
         "max_pkm_moves": max_pkm_moves,
         "roster_size": roster_size,
         "n_moves": n_moves,
+        "control": control,
         "vgc_ai_elo": int(cm_ours.elo),
         "control_elo": int(cm_ctrl.elo),
         "elo_delta": round(cm_ours.elo - cm_ctrl.elo, 2),
@@ -149,6 +166,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--output", type=str, default=None)
     p.add_argument(
+        "--control",
+        choices=sorted(CONTROL_TEAMBUILDERS.keys()),
+        default="random",
+        help="Control's team-build policy. 'random' is the prior baseline; 'metausage' is the prior best.",
+    )
+    p.add_argument(
         "--min-elo-delta",
         type=float,
         default=MIN_ELO_DELTA,
@@ -165,6 +188,7 @@ def main(argv: list[str] | None = None) -> int:
         roster_size=args.roster_size,
         n_moves=args.n_moves,
         seed=args.seed,
+        control=args.control,
     )
     text = json.dumps(result, indent=2)
     print(text)
