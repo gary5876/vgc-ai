@@ -1,0 +1,14 @@
+{
+  "timestamp": "2026-05-18T15:39:46+00:00",
+  "epochs": 10,
+  "n_battles": 3,
+  "n_active": 2,
+  "max_team_size": 4,
+  "max_pkm_moves": 4,
+  "roster_size": 30,
+  "n_moves": 60,
+  "doubles_table_elo": 1117,
+  "typechart_elo": 1282,
+  "elo_delta": -164.31,
+  "elapsed_sec": 11.85
+}
