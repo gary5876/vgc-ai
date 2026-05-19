@@ -4,7 +4,7 @@ Project rules for Claude Code. Read this before any work.
 
 ## Project
 
-`vgc-ai` is a competitor for the **IEEE VGC AI Competition 2026** (4th edition), held at IEEE Conference on Games (CoG) 2026 in Madrid, Sept 1-4, 2026. The competition is organized by Simão Reis (Vortex-CoLab / LIACC, Univ. Porto). Goal: top-3 finish across the three tracks.
+`vgc-ai` is a competitor for the **IEEE VGC AI Competition 2026** (4th edition), held at IEEE Conference on Games (CoG) 2026 in Madrid, Sept 1-4, 2026. The competition is organized by Simão Reis (Vortex-CoLab / LIACC, Univ. Porto). **Goal: win (top-1) all three tracks.** Top-3 is a fallback, not the target — decisions trade off in favor of raw strength over safety margins.
 
 The competition runs on the **`vgc2`** framework ([`pokemon-vgc-engine`](https://gitlab.com/DracoStriker/pokemon-vgc-engine)) — a standalone abstracted Pokemon-like simulator. **It is NOT Pokemon Showdown.** Supports both singles and doubles via the `n_active` parameter; the **Battle Track default is `n_active=2` (doubles)** per `organization/run_battle_track.py`. Fictional roster, parametric moves. Mechanics are simplified for tractable AI work.
 

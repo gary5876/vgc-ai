@@ -1,17 +1,25 @@
-"""Championship A/B: doubles-matchup-table selection vs type-chart-only.
+"""Championship A/B harness for selection-policy variants.
 
-Drives ``vgc2.competition.ecosystem.Championship`` (which calls ``set_meta``
-on the SelectionPolicy via ``Match._run_non_random``, so the table-aware
-policy receives the roster) and pits two competitors with identical battle
-and team-build policies but distinct selection policies:
+History: PR #19 ran a doubles-matchup-table SelectionPolicy through this
+harness and recorded a -86 ELO mean regression vs the type-chart proxy.
+The table-using policy was discarded; only its negative-result write-up
+survives in ``vgc_ai.policies.selection``'s module docstring.
 
-- A: ``MatchupAwareSelectionPolicy`` (default) — uses the doubles matchup
-  table when meta is provided.
-- B: ``_TypeChartOnlySelectionPolicy`` (inline) — always uses the type-chart
-  proxy, regardless of meta.
+**Current state (round-robin audit, 2026-05-19): both A and B are
+functionally identical.** ``MatchupAwareSelectionPolicy`` (in
+``selection.py``) and the inline ``_TypeChartOnlySelectionPolicy`` here
+both score via ``_selection_score`` / ``_type_chart_score`` (the same
+function — line 86 of ``selection.py`` aliases one to the other). Running
+this script now produces only Championship-variance noise; the docstring
+claim that A "uses the doubles matchup table when meta is provided" has
+been stale since merge time.
 
-Reports ELO delta. Singleton-table-for-selection (PR #18's negative result)
-was -90 ELO; this PR's doubles table is the calibrated replacement.
+The harness is retained because the natural next experiment — an
+LP-minimax SelectionPolicy over the doubles table (see
+``vgc_ai.policies.selection``'s module docstring for the proposed shape)
+— will need exactly this competitor-shape. A future PR should add the new
+variant as a named ``SelectionPolicy`` class and have B import it instead
+of the now-redundant inline shim.
 """
 
 from __future__ import annotations
@@ -44,7 +52,12 @@ MIN_ELO_DELTA = 50.0
 
 
 class _TypeChartOnlySelectionPolicy(SelectionPolicy):  # type: ignore[misc]
-    """Pre-upgrade control: always uses the type-chart proxy, ignores meta."""
+    """Inline copy of the type-chart scorer; identical to ``MatchupAwareSelectionPolicy``.
+
+    Currently functionally equivalent to the policy it's benched against —
+    see the module docstring for the audit note. Retained as the slot a
+    future LP-minimax-over-doubles-table variant will fill.
+    """
 
     def decision(self, teams: tuple[Team, Team], max_size: int) -> SelectionCommand:
         my_team, opp_team = teams

@@ -1,0 +1,29 @@
+{
+  "timestamp": "2026-05-18T17:13:04+00:00",
+  "epochs": 30,
+  "n_battles": 3,
+  "n_active": 2,
+  "max_team_size": 4,
+  "max_pkm_moves": 4,
+  "roster_size": 30,
+  "n_moves": 60,
+  "ranking": [
+    {
+      "name": "minimax",
+      "elo": 1962
+    },
+    {
+      "name": "matchup_table",
+      "elo": 1588
+    },
+    {
+      "name": "metausage",
+      "elo": 729
+    },
+    {
+      "name": "random",
+      "elo": 519
+    }
+  ],
+  "elapsed_sec": 60.36
+}
