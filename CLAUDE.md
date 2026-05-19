@@ -10,8 +10,11 @@ The competition runs on the **`vgc2`** framework ([`pokemon-vgc-engine`](https:/
 
 ## Decisions (locked, ask before changing)
 
-- **Target competition**: IEEE VGC AI Competition 2026, all three tracks (Battle, Championship, Rules Balance).
-- **Framework**: `vgc2` from `pokemon-vgc-engine`, pinned to commit `b0b77f9b` in `pyproject.toml`. Update only when Reis announces the 4th-edition official pin.
+- **Target competition**: IEEE VGC AI Competition 2026, all three tracks. **Confirmed structure** (Reis Discord announcement, 2026-05-19):
+  - **Battle Track** — general game-playing; rules dynamically generated per tournament; `BattlePolicy` reads `self.params` to adapt.
+  - **Championship Track** — meta-game reasoning; team-build agents produce meta priors that battle agents consume via the new `BattlePolicy.set_meta(meta)` hook.
+  - **Balance Track** — Meta-Balance and Rules-Balance merged at submission. Framework still ships two ABCs (`MetaBalancePolicy`, `RuleBalancePolicy`) under a single `DesignCompetitor`.
+- **Framework**: `vgc2` from `pokemon-vgc-engine`, pinned to commit `b0b77f9b` in `pyproject.toml`. **This pin is vgc2 v2.1.1 (Apr 2026)** — already the 4th-edition framework Reis released for 2026. Re-pin only when Reis publishes a v2.2.x successor or names a new SHA.
 - **Approach**: **MCTS / tabular Monte Carlo + heuristic eval for battle policy**; **GA or LP for team building**. Not deep RL — the 2024 3rd-place writeup (AurelianTactics) demonstrated deep RL fails under the engine's randomness, and tabular MC won.
 - **Default battle policy**: `GreedyBattlePolicy` (submission-viable). `TreeSearchBattlePolicy` is too slow for doubles (~11 s/turn measured at `max_depth=1, n_active=2`) and is reserved for **local benchmarking only**, not the submission. Any new battle policy must beat Greedy AND fit a sub-second-per-turn budget.
 - **Submission**: Python `Competitor` subclass (see `vgc2.competition.Competitor`), submitted via Google Form per the 2025 procedure. Confirm format with organizers once 4th-edition rules wiki is published.
