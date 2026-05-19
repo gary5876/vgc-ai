@@ -7,6 +7,7 @@ Mix of synthetic teams (for deterministic ranking checks) and
 from __future__ import annotations
 
 from numpy.random import default_rng
+from vgc2.balance.meta import BasicMeta
 from vgc2.battle_engine import BattleRuleParam
 from vgc2.battle_engine.modifiers import Category, Nature, Type
 from vgc2.battle_engine.move import Move
@@ -134,3 +135,11 @@ def test_offense_multiplier_skips_status_moves() -> None:
 def test_selection_score_zero_against_empty_opp() -> None:
     pkm = _mk_pkm(types=[Type.NORMAL], move_types=[Type.NORMAL])
     assert _selection_score(pkm, Team([]), PARAMS) == 0.0
+
+
+def test_set_meta_stores_meta_on_instance() -> None:
+    policy = MatchupAwareSelectionPolicy()
+    assert policy._meta is None
+    meta = BasicMeta(move_set=[], roster=[])
+    policy.set_meta(meta)
+    assert policy._meta is meta
