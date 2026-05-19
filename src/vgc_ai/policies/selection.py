@@ -44,6 +44,7 @@ Negative results recorded (so future tuners don't repeat them):
 from __future__ import annotations
 
 from vgc2.agent import SelectionCommand, SelectionPolicy
+from vgc2.balance.meta import Meta
 from vgc2.battle_engine import BattleRuleParam
 from vgc2.battle_engine.damage_calculator import type_effectiveness_modifier
 from vgc2.battle_engine.pokemon import Pokemon
@@ -88,6 +89,16 @@ _type_chart_score = _selection_score
 
 class MatchupAwareSelectionPolicy(SelectionPolicy):  # type: ignore[misc]
     """Order team members by net type matchup vs the opponent's team."""
+
+    def __init__(self) -> None:
+        self._meta: Meta | None = None
+
+    def set_meta(self, meta: Meta) -> None:
+        # v2.1.x Championship Track hook — store the meta for later
+        # consumption in scoring (usage-weighted priors). Plumbing only;
+        # _selection_score still uses the type-chart proxy.
+        super().set_meta(meta)
+        self._meta = meta
 
     def decision(self, teams: tuple[Team, Team], max_size: int) -> SelectionCommand:
         my_team, opp_team = teams
