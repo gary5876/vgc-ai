@@ -1,13 +1,15 @@
-"""Tabular first-visit Monte Carlo battle policy (skeleton).
+"""Tabular first-visit Monte Carlo battle policy.
 
 Follows the structure of AurelianTactics 2024 (3rd place): a collapsed
 ~11-dim integer state encoding, a state→action-values table backed by a plain
 ``dict``, and a first-visit MC ``learn`` step that averages observed returns.
 
-This module ships the **skeleton only**. The table starts empty; an untrained
-instance falls back to uniform-random behaviour over the legal joint actions
-returned by :func:`vgc2.agent.battle.get_actions`. Training (trajectory
-collection + reward shaping) is a follow-up task.
+Inference falls back to ``GreedyBattlePolicy`` whenever the encoded state is
+unseen or no candidate action has cleared the ``min_visits`` threshold —
+matching the writeup's "if found in dictionary, take the action; if not, use
+the baseline agent." This is the load-bearing detail: an earlier random
+fallback meant most turns picked a random legal action (round-robin row
+``tabular_mc vs random = 0.500``), masking the Q-table entirely.
 
 State encoding (11 dims for doubles, ``n_active=2``):
 
@@ -32,9 +34,13 @@ from pathlib import Path
 from typing import Any
 
 from vgc2.agent import BattlePolicy
-from vgc2.agent.battle import get_actions
+from vgc2.agent.battle import GreedyBattlePolicy, get_actions
 from vgc2.battle_engine import BattleCommand, State
 from vgc2.battle_engine.view import TeamView
+
+_DEFAULT_MIN_VISITS = 100
+"""Per AurelianTactics 2024: ignore Q-values backed by fewer than 100 visits;
+fall through to the baseline. Typical well-sampled states had 1000-20000 visits."""
 
 StateKey = tuple[int, ...]
 """Encoded state — a fixed-length integer tuple, hashable for dict use."""
@@ -100,18 +106,30 @@ def encode_state(state: State) -> StateKey:
 class TabularMCBattlePolicy(BattlePolicy):  # type: ignore[misc]  # vgc2 is untyped; BattlePolicy resolves as Any under --strict
     """First-visit Monte Carlo over a collapsed integer state encoding.
 
-    The table is empty until :meth:`learn` is called; until then,
-    :meth:`decision` returns a uniformly-random legal joint action from
-    :func:`get_actions`. After training, the policy picks the joint action
-    with the highest visited mean return for the encoded state, falling back
-    to random when the state is unseen or no candidate joint action has been
-    visited.
+    When the encoded state is unseen, or no candidate joint action has reached
+    ``min_visits`` samples, :meth:`decision` delegates to
+    :class:`GreedyBattlePolicy`. This means an *empty* table behaves exactly
+    like greedy — a strong floor — and the Q-table is pure upside above it.
+    Once a state-action pair has enough samples, the policy picks the
+    highest-mean-return joint action.
     """
 
-    def __init__(self, rng_seed: int | None = None) -> None:
+    def __init__(
+        self,
+        rng_seed: int | None = None,
+        *,
+        min_visits: int = _DEFAULT_MIN_VISITS,
+        model_path: str | Path | None = None,
+    ) -> None:
         self._q: dict[StateKey, list[float]] = {}
         self._n: dict[StateKey, list[int]] = {}
         self._rng = random.Random(rng_seed)
+        self._min_visits = min_visits
+        self._baseline = GreedyBattlePolicy()
+        if model_path is not None:
+            path = Path(model_path)
+            if path.is_file():
+                self.load(path)
 
     def decision(
         self,
@@ -131,11 +149,12 @@ class TabularMCBattlePolicy(BattlePolicy):  # type: ignore[misc]  # vgc2 is unty
         if q_row is not None and n_row is not None:
             limit = min(len(joint_actions), len(q_row))
             for idx in range(limit):
-                if n_row[idx] > 0 and q_row[idx] > best_val:
+                if n_row[idx] >= self._min_visits and q_row[idx] > best_val:
                     best_val = q_row[idx]
                     best_idx = idx
         if best_idx < 0:
-            best_idx = self._rng.randrange(len(joint_actions))
+            fallback: list[BattleCommand] = self._baseline.decision(state, opp_view)
+            return fallback
         return list(joint_actions[best_idx])
 
     def learn(self, trajectories: list[list[tuple[StateKey, int, float]]]) -> None:
