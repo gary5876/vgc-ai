@@ -51,12 +51,16 @@ Negative results recorded (so future tuners don't repeat them):
 
 from __future__ import annotations
 
+import numpy as np
+import numpy.typing as npt
 from vgc2.agent import SelectionCommand, SelectionPolicy
 from vgc2.balance.meta import Meta
 from vgc2.battle_engine import BattleRuleParam
 from vgc2.battle_engine.damage_calculator import type_effectiveness_modifier
 from vgc2.battle_engine.pokemon import Pokemon
 from vgc2.battle_engine.team import Team
+
+from vgc_ai.eval.minimax import solve_row_minimax_policy
 
 
 def _best_offense_multiplier(
@@ -327,9 +331,88 @@ class MetaThreatAwareSelectionPolicy(MatchupAwareSelectionPolicy):
         return ordered[:max_size]
 
 
+def _matchup_payoff_matrix(
+    my_team: Team, opp_team: Team, params: BattleRuleParam
+) -> npt.NDArray[np.float64]:
+    """Build the (|my|, |opp|) type-chart matchup matrix.
+
+    ``M[i, j] = best_offense(my_i, opp_j) - best_offense(opp_j, my_i)``
+    is the same primitive that ``MatchupAwareSelectionPolicy`` averages
+    uniformly over the opp team. Here it stays as the raw row-vs-column
+    payoff so an LP-minimax solver can find the row-player's worst-case
+    optimal mixing.
+    """
+    m = len(my_team.members)
+    k = len(opp_team.members)
+    matrix = np.zeros((m, k), dtype=np.float64)
+    for i, my in enumerate(my_team.members):
+        for j, opp in enumerate(opp_team.members):
+            matrix[i, j] = _best_offense_multiplier(my, opp, params) - _best_offense_multiplier(
+                opp, my, params
+            )
+    return matrix
+
+
+class LpMinimaxSelectionPolicy(MatchupAwareSelectionPolicy):
+    """Order selection by LP-minimax over the (my x opp) matchup matrix.
+
+    Constructs an (|my|, |opp|) payoff matrix ``M`` where
+    ``M[i, j] = best_offense(my_i, opp_j) - best_offense(opp_j, my_i)``
+    -- the same type-chart primitive that
+    ``MatchupAwareSelectionPolicy`` averages uniformly -- then solves
+    the row-player's max-min Nash equilibrium over that matrix. Members
+    are ordered by descending equilibrium mass: leads that are robust
+    against the opponent's worst-case lead choice come first. The
+    uniform ``_selection_score`` is the secondary tiebreak, then index.
+
+    Theoretical leverage over the uniform mean parent:
+
+    - The uniform mean assumes the opp leads with a uniform draw over
+      their team. The LP assumes the opp leads with whichever member
+      hurts us most -- adversarial, not stochastic. In a roster with
+      rock-paper-scissors structure (each of our members hard-counters
+      one opp but is cleanly beaten by another) the uniform mean
+      tiebreaks arbitrarily; the LP picks the portfolio that maximises
+      the worst-case expected matchup.
+    - Composes naturally with ``MinimaxTeamBuildPolicy``, which already
+      runs the same LP idea at the team-build layer; both layers
+      then optimise the same minimax objective at their respective
+      decision points.
+
+    Ignores ``meta`` on purpose. The meta-weighted siblings
+    (``MetaWeightedSelectionPolicy``, ``MetaThreatAwareSelectionPolicy``)
+    already shift the opp distribution toward usage; this policy goes
+    the opposite direction -- assume nothing about the opp's draw,
+    pessimise against pure strategies. The two angles are
+    complementary and the simple uniform parent is the clean A/B
+    baseline.
+
+    Falls back to the uniform parent when the opp team is empty (no
+    columns) or when our team has a single member (trivial 1-row LP).
+    """
+
+    def decision(self, teams: tuple[Team, Team], max_size: int) -> SelectionCommand:
+        my_team, opp_team = teams
+        if not opp_team.members or len(my_team.members) <= 1:
+            return super().decision(teams, max_size)
+        params: BattleRuleParam = self.params
+        matrix = _matchup_payoff_matrix(my_team, opp_team, params)
+        p = solve_row_minimax_policy(matrix)
+        scored = sorted(
+            range(len(my_team.members)),
+            key=lambda i: (
+                -p[i],
+                -_selection_score(my_team.members[i], opp_team, params),
+                i,
+            ),
+        )
+        return scored[:max_size]
+
+
 VgcAiSelectionPolicy = MatchupAwareSelectionPolicy
 
 __all__ = [
+    "LpMinimaxSelectionPolicy",
     "MatchupAwareSelectionPolicy",
     "MetaThreatAwareSelectionPolicy",
     "MetaWeightedSelectionPolicy",

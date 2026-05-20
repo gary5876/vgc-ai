@@ -32,6 +32,7 @@ from vgc_ai.policies.heuristic_det import HeuristicDetBattlePolicy
 from vgc_ai.policies.meta_balance import NoOpMetaBalancePolicy
 from vgc_ai.policies.rule_balance import DefaultRuleBalancePolicy
 from vgc_ai.policies.selection import (
+    LpMinimaxSelectionPolicy,
     MatchupAwareSelectionPolicy,
     MetaThreatAwareSelectionPolicy,
     MetaWeightedSelectionPolicy,
@@ -137,6 +138,20 @@ CHAMPIONSHIP_STRATEGIES: dict[str, ChampionshipStrategy] = {
             name="minimax+meta_threat_aware_selection",
             team_build_policy=MinimaxTeamBuildPolicy,
             selection_policy=MetaThreatAwareSelectionPolicy,
+        ),
+        # Same LP-minimax team builder as the current default; the
+        # differentiator is the selection layer, which solves a
+        # row-player LP-minimax over the (my x opp) type-chart matchup
+        # matrix and orders by equilibrium mass. Adversarial in opp lead
+        # choice (worst case) rather than stochastic (uniform mean) --
+        # the open leverage point flagged in
+        # ``vgc_ai.policies.selection``'s negative-results docstring.
+        # Composes the same minimax objective at both team-build and
+        # selection layers.
+        ChampionshipStrategy(
+            name="minimax+lp_minimax_selection",
+            team_build_policy=MinimaxTeamBuildPolicy,
+            selection_policy=LpMinimaxSelectionPolicy,
         ),
     )
 }
