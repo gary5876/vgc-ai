@@ -74,12 +74,60 @@ def _default_claude_runner(cmd: list[str], _prompt: str) -> tuple[int, str, str]
     return result.returncode, result.stdout, result.stderr
 
 
+DEFAULT_MIN_INTERVAL_SEC = 1800  # 30 min: hard floor between successful attempts
+
+
 def previous_attempts(attempts_path: Path) -> list[dict[str, str]]:
     """Read the proposer-attempts log; empty list if file is missing."""
     if not attempts_path.exists():
         return []
     with attempts_path.open(encoding="utf-8") as f:
         return list(csv.DictReader(f))
+
+
+def has_new_signal(
+    attempts_path: Path,
+    min_interval_sec: int = DEFAULT_MIN_INTERVAL_SEC,
+    now: datetime | None = None,
+) -> tuple[bool, str]:
+    """Decide whether the proposer has enough new context to be worth a Claude fire.
+
+    Returns ``(should_fire, reason)``:
+
+    - Fire if no prior attempts exist (first run ever).
+    - Fire if the last attempt exited non-zero (retry — Claude may do
+      better with the failure information in the next prompt).
+    - Fire if ``min_interval_sec`` has elapsed since the last attempt.
+    - Skip otherwise — the loop just fired and the world hasn't had
+      time to change meaningfully (e.g., the bench loop hasn't measured
+      the most-recently-merged compound yet).
+
+    The min-interval floor prevents the "loop restarted and immediately
+    re-fires the same proposal" failure mode. It does NOT replace the
+    shell driver's sleep cadence — both throttle independently.
+    """
+    attempts = previous_attempts(attempts_path)
+    if not attempts:
+        return True, "no prior attempts"
+    last = attempts[-1]
+    last_exit = last.get("exit_code", "0")
+    if last_exit != "0":
+        return True, f"last attempt exited {last_exit} — retrying"
+    last_ts_str = last.get("timestamp", "")
+    if not last_ts_str:
+        return True, "last attempt has no timestamp — firing"
+    try:
+        last_ts = datetime.fromisoformat(last_ts_str)
+    except ValueError:
+        return True, f"unparseable last-attempt timestamp {last_ts_str!r} — firing"
+    current = now or datetime.now(UTC)
+    elapsed = (current - last_ts).total_seconds()
+    if elapsed >= min_interval_sec:
+        return True, f"{elapsed:.0f}s since last attempt (>= {min_interval_sec}s threshold)"
+    return False, (
+        f"only {elapsed:.0f}s since last successful attempt "
+        f"(< {min_interval_sec}s threshold) — skipping to avoid duplicate proposals"
+    )
 
 
 def _log_attempt(
@@ -194,6 +242,27 @@ def build_prompt(
             for a in attempts[-20:]
         )
     )
+    # Surface the most recent attempt's status prominently so Claude knows
+    # whether to course-correct (failure) or build on top (success). Without
+    # this, Claude only sees a flat list of names and may re-propose similar
+    # ideas that failed for the same reason.
+    last_status_blob = "(no prior attempts)"
+    if attempts:
+        last = attempts[-1]
+        last_exit = last.get("exit_code", "?")
+        if last_exit == "0":
+            last_status_blob = (
+                f"Last attempt SUCCEEDED: {last.get('compound_name', '?')} "
+                f"on the {last.get('track', '?')} track. "
+                f"Choose a different angle this time — a near-duplicate adds no signal."
+            )
+        else:
+            last_status_blob = (
+                f"Last attempt FAILED (exit={last_exit}): "
+                f"{last.get('compound_name', '?')} on the {last.get('track', '?')} track. "
+                f"Investigate what likely went wrong (CI red, scope violation, "
+                f"or Claude session timeout) before re-attempting the same approach."
+            )
 
     return f"""You are proposing AND implementing a new compound strategy for the vgc-ai project.
 
@@ -203,6 +272,9 @@ Bench context (recent pooled head-to-head, per track):
 ```
 {summary_blob}
 ```
+
+Most recent attempt status:
+{last_status_blob}
 
 Prior proposer attempts (do NOT re-propose the same compound name):
 ```
@@ -323,6 +395,17 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--cap", type=int, default=DEFAULT_DAILY_CAP)
     p.add_argument("--recent", type=int, default=DEFAULT_RECENT_ROWS)
     p.add_argument(
+        "--min-interval",
+        type=int,
+        default=DEFAULT_MIN_INTERVAL_SEC,
+        help=(
+            "Minimum seconds between successful Claude invocations. Even if the "
+            "shell driver wakes more often (e.g., SLEEP_SEC=900), the proposer "
+            "skips firing until this floor is met. Bypassed when the previous "
+            "attempt exited non-zero (retry-on-failure)."
+        ),
+    )
+    p.add_argument(
         "--dry-run",
         action="store_true",
         help="Decide track + print prompt; never invoke claude.",
@@ -347,6 +430,15 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 0
+
+    # Step 2.5 — new-signal gate. Skip if the last successful attempt was
+    # recent enough that the world hasn't changed; firing now would just
+    # spend Claude tokens producing a near-duplicate proposal.
+    should_fire, signal_reason = has_new_signal(args.attempts, args.min_interval)
+    if not should_fire:
+        print(f"proposer: skipping — {signal_reason}", file=sys.stderr)
+        return 0
+    print(f"proposer: firing — {signal_reason}", file=sys.stderr)
 
     # Step 3 — shape bench context per track (zero Claude tokens).
     summaries = {

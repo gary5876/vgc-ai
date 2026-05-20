@@ -45,7 +45,7 @@ from vgc_ai.strategies import (
 
 DEFAULT_CSV_DIR = Path("bench/strategies")
 DEFAULT_BUDGET_PATH = Path("ops/claude_budget.csv")
-DEFAULT_DAILY_CAP = 12
+DEFAULT_DAILY_CAP = 50  # bumped 2026-05-20 — user's Max plan tolerates frequent calls
 DEFAULT_RECENT_ROWS = 50
 BENCH_GATE_MARKER = "BENCH GATE"
 CLAUDE_TIMEOUT_SEC = 900
