@@ -32,6 +32,7 @@ from vgc_ai.policies.heuristic_det import HeuristicDetBattlePolicy
 from vgc_ai.policies.meta_balance import NoOpMetaBalancePolicy
 from vgc_ai.policies.rule_balance import DefaultRuleBalancePolicy
 from vgc_ai.policies.selection import (
+    DamageAwareSelectionPolicy,
     MatchupAwareSelectionPolicy,
     MetaThreatAwareSelectionPolicy,
     MetaWeightedSelectionPolicy,
@@ -137,6 +138,21 @@ CHAMPIONSHIP_STRATEGIES: dict[str, ChampionshipStrategy] = {
             name="minimax+meta_threat_aware_selection",
             team_build_policy=MinimaxTeamBuildPolicy,
             selection_policy=MetaThreatAwareSelectionPolicy,
+        ),
+        # Same LP-minimax team builder as the current default; the
+        # differentiator is the selection layer, which swaps the pure
+        # type-chart multiplier primitive used by every other entry for
+        # an actual game-formula damage fraction (base_power * STAB *
+        # type_mod * ATK_or_SPA / DEF_or_SPD / defender.MAX_HP). The
+        # uniform-mean structure is identical to the default; the only
+        # axis that changes is the offense / defense primitive. The
+        # advertised leverage: a tanky high-ATK 1x lead now correctly
+        # outranks a frail low-ATK 2x lead, which the type-chart proxy
+        # cannot distinguish.
+        ChampionshipStrategy(
+            name="minimax+damage_aware_selection",
+            team_build_policy=MinimaxTeamBuildPolicy,
+            selection_policy=DamageAwareSelectionPolicy,
         ),
     )
 }

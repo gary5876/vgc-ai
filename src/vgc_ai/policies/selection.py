@@ -55,6 +55,7 @@ from vgc2.agent import SelectionCommand, SelectionPolicy
 from vgc2.balance.meta import Meta
 from vgc2.battle_engine import BattleRuleParam
 from vgc2.battle_engine.damage_calculator import type_effectiveness_modifier
+from vgc2.battle_engine.modifiers import Category, Stat
 from vgc2.battle_engine.pokemon import Pokemon
 from vgc2.battle_engine.team import Team
 
@@ -327,9 +328,118 @@ class MetaThreatAwareSelectionPolicy(MatchupAwareSelectionPolicy):
         return ordered[:max_size]
 
 
+def _damage_fraction(attacker: Pokemon, defender: Pokemon, params: BattleRuleParam) -> float:
+    """Max fraction of defender's HP the attacker can strip in one hit.
+
+    Mirrors ``vgc2.battle_engine.damage_calculator.calculate_damage`` for the
+    multiplicative side of the formula, dropping additive level constants and
+    state-dependent modifiers (boosts, weather, status, light screen) that
+    aren't available pre-battle. For each of the attacker's damaging moves:
+
+        damage = base_power * STAB * type_mod * attack_stat / defense_stat
+
+    where ``attack_stat`` is the attacker's ATK (PHYSICAL move) or SPA
+    (SPECIAL); ``defense_stat`` is the defender's DEF / SPD respectively.
+    OTHER-category moves and ``base_power == 0`` (status) moves are skipped.
+    The returned value is the best such damage divided by defender's MAX_HP --
+    so it sits on a ``[0, ~few]`` scale where 1.0 means "this move OHKOs the
+    defender at full HP".
+
+    Returns 0.0 when no damaging move exists. This is intentionally lower
+    than ``_best_offense_multiplier``'s 1.0 baseline -- a status-only kit
+    really *cannot* dent the opp's HP, and the selection score should
+    reflect that rather than pretend neutral damage exists.
+    """
+    if defender.stats[Stat.MAX_HP] <= 0:
+        return 0.0
+    best = 0.0
+    for move in attacker.moves:
+        if move.base_power == 0:
+            continue
+        if move.category == Category.PHYSICAL:
+            attack_stat = attacker.stats[Stat.ATTACK]
+            defense_stat = defender.stats[Stat.DEFENSE]
+        elif move.category == Category.SPECIAL:
+            attack_stat = attacker.stats[Stat.SPECIAL_ATTACK]
+            defense_stat = defender.stats[Stat.SPECIAL_DEFENSE]
+        else:
+            continue
+        if defense_stat <= 0:
+            continue
+        stab = params.STAB_MODIFIER if move.pkm_type in attacker.species.types else 1.0
+        type_mod = type_effectiveness_modifier(params, move.pkm_type, defender.species.types)
+        dmg = move.base_power * stab * type_mod * attack_stat / defense_stat
+        frac = dmg / defender.stats[Stat.MAX_HP]
+        if frac > best:
+            best = frac
+    return best
+
+
+def _damage_aware_score(my_pkm: Pokemon, opp_team: Team, params: BattleRuleParam) -> float:
+    """Net (offense - defense) HP-fraction advantage averaged over opp_team.
+
+    Same uniform-mean structure as ``_selection_score``, but offense and
+    defense are estimated via ``_damage_fraction`` instead of pure type-chart
+    multipliers. The signal is "fraction of opp HP we strip per hit minus
+    fraction of our HP they strip per hit" -- positive means we win the
+    asymptotic 1v1 trade.
+    """
+    if not opp_team.members:
+        return 0.0
+    offense = 0.0
+    defense = 0.0
+    for opp in opp_team.members:
+        offense += _damage_fraction(my_pkm, opp, params)
+        defense += _damage_fraction(opp, my_pkm, params)
+    n = len(opp_team.members)
+    return (offense - defense) / n
+
+
+class DamageAwareSelectionPolicy(MatchupAwareSelectionPolicy):
+    """Order team members by HP-fraction damage averaged over the opponent.
+
+    The existing siblings (``MatchupAwareSelectionPolicy``,
+    ``MetaWeightedSelectionPolicy``, ``MetaThreatAwareSelectionPolicy``)
+    all score via the same pure type-chart multiplier primitive
+    (``_best_offense_multiplier``). That collapses stat differences: a
+    frail 30-ATK attacker with a 2x move looks indistinguishable from a
+    tanky 250-ATK attacker with a 1x move, even though their realised
+    damage outputs differ by an order of magnitude.
+
+    This policy uses ``_damage_fraction`` -- the actual game-formula
+    damage divided by defender max HP -- so:
+
+    - Offensive stats matter: a high-ATK / -SPA lead outranks a low-stat
+      lead carrying the same type advantage.
+    - Defensive bulk matters: a bulky lead absorbs more incoming damage
+      from the same opp threat than a frail one, so the defense term is
+      naturally scaled by HP and DEF / SPD.
+    - Move category matters: PHYSICAL moves are tempered by DEF, SPECIAL
+      by SPD -- a mixed defensive profile correctly distinguishes the two
+      attacker categories instead of collapsing them.
+
+    Ignores ``meta`` on purpose -- this is the single-axis change vs the
+    type-chart parent, isolating the *damage-prediction* improvement from
+    any usage-prior or LP-minimax composition. The clean A/B against
+    ``minimax+matchup_aware`` is exactly the same uniform-mean formula
+    with the offense / defense primitive swapped out.
+    """
+
+    def decision(self, teams: tuple[Team, Team], max_size: int) -> SelectionCommand:
+        my_team, opp_team = teams
+        params: BattleRuleParam = self.params
+        scored = [
+            (-_damage_aware_score(p, opp_team, params), i) for i, p in enumerate(my_team.members)
+        ]
+        scored.sort()
+        ordered = [i for _, i in scored]
+        return ordered[:max_size]
+
+
 VgcAiSelectionPolicy = MatchupAwareSelectionPolicy
 
 __all__ = [
+    "DamageAwareSelectionPolicy",
     "MatchupAwareSelectionPolicy",
     "MetaThreatAwareSelectionPolicy",
     "MetaWeightedSelectionPolicy",
