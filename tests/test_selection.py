@@ -18,11 +18,13 @@ from vgc2.util.generator import gen_team
 from vgc_ai.policies.selection import (
     MatchupAwareSelectionPolicy,
     MetaWeightedSelectionPolicy,
+    ThreatAwareSelectionPolicy,
     VgcAiSelectionPolicy,
     _best_offense_multiplier,
     _meta_weighted_selection_score,
     _opp_usage_weights,
     _selection_score,
+    _threat_aware_selection_score,
 )
 
 PARAMS = BattleRuleParam()
@@ -265,3 +267,89 @@ def test_meta_weighted_uses_typechart_when_meta_set_but_zero_usage() -> None:
 def test_meta_weighted_score_is_zero_for_empty_opp_team() -> None:
     pkm = _mk_pkm(types=[Type.NORMAL], move_types=[Type.NORMAL])
     assert _meta_weighted_selection_score(pkm, Team([]), [], PARAMS) == 0.0
+
+
+# ----- ThreatAwareSelectionPolicy ----------------------------------------
+
+
+def test_threat_aware_alias_subclasses_matchup_aware() -> None:
+    assert issubclass(ThreatAwareSelectionPolicy, MatchupAwareSelectionPolicy)
+
+
+def test_threat_aware_score_zero_for_empty_opp() -> None:
+    pkm = _mk_pkm(types=[Type.NORMAL], move_types=[Type.NORMAL])
+    assert _threat_aware_selection_score(pkm, Team([]), PARAMS) == 0.0
+
+
+def test_threat_aware_score_lower_than_mean_when_spiky_threat() -> None:
+    # Opp 0: rock attacker (2x vs flier). Opp 1: neutral (1x vs flier).
+    # MatchupAware defense for flier = mean(2, 1) = 1.5.
+    # ThreatAware defense for flier = max(2, 1) = 2.0.
+    # So the ThreatAware score is strictly LOWER (more conservative).
+    flier = _mk_pkm(types=[Type.FLYING], move_types=[Type.FIGHT])
+    rock = _mk_pkm(types=[Type.ROCK], move_types=[Type.ROCK])
+    neutral = _mk_pkm(types=[Type.NORMAL], move_types=[Type.NORMAL])
+    opp_team = Team([rock, neutral])
+    parent_score = _selection_score(flier, opp_team, PARAMS)
+    threat_score = _threat_aware_selection_score(flier, opp_team, PARAMS)
+    assert threat_score < parent_score
+
+
+def test_threat_aware_score_equals_mean_when_threats_uniform() -> None:
+    flier = _mk_pkm(types=[Type.FLYING], move_types=[Type.FIGHT])
+    rock_a = _mk_pkm(types=[Type.ROCK], move_types=[Type.ROCK])
+    rock_b = _mk_pkm(types=[Type.ROCK], move_types=[Type.ROCK])
+    opp_team = Team([rock_a, rock_b])
+    parent_score = _selection_score(flier, opp_team, PARAMS)
+    threat_score = _threat_aware_selection_score(flier, opp_team, PARAMS)
+    assert abs(threat_score - parent_score) < 1e-9
+
+
+def test_threat_aware_demotes_member_with_one_quadex_threat() -> None:
+    # A: GRASS/ICE (4x weak to FIRE). B: GRASS (2x weak to FIRE).
+    # Same offense kit. Opp team: one FIRE attacker.
+    grass_ice = _mk_pkm(types=[Type.GRASS, Type.ICE], move_types=[Type.GRASS])
+    grass_only = _mk_pkm(types=[Type.GRASS], move_types=[Type.GRASS])
+    fire_attacker = _mk_pkm(types=[Type.FIRE], move_types=[Type.FIRE])
+    my_team = Team([grass_ice, grass_only])
+    opp_team = Team([fire_attacker])
+    policy = ThreatAwareSelectionPolicy()
+    cmd = policy.decision((my_team, opp_team), 2)
+    assert cmd[0] == 1
+
+
+def test_threat_aware_returns_unique_in_range_capped_to_max_size() -> None:
+    rng = default_rng(601)
+    my_team = gen_team(4, 4, rng=rng)
+    opp_team = gen_team(4, 4, rng=rng)
+    policy = ThreatAwareSelectionPolicy()
+    cmd = policy.decision((my_team, opp_team), 4)
+    assert len(cmd) <= 4
+    assert len(set(cmd)) == len(cmd)
+    assert all(0 <= i < len(my_team.members) for i in cmd)
+
+
+def test_threat_aware_empty_opp_team_returns_stable_order() -> None:
+    rng = default_rng(603)
+    my_team = gen_team(4, 4, rng=rng)
+    empty = Team([])
+    policy = ThreatAwareSelectionPolicy()
+    cmd = policy.decision((my_team, empty), 4)
+    assert cmd == [0, 1, 2, 3]
+
+
+def test_threat_aware_max_size_caps_output() -> None:
+    rng = default_rng(605)
+    my_team, opp_team = gen_team(4, 4, rng=rng), gen_team(4, 4, rng=rng)
+    policy = ThreatAwareSelectionPolicy()
+    cmd = policy.decision((my_team, opp_team), 2)
+    assert len(cmd) == 2
+
+
+def test_threat_aware_deterministic_across_calls() -> None:
+    rng = default_rng(607)
+    my_team, opp_team = gen_team(4, 4, rng=rng), gen_team(4, 4, rng=rng)
+    policy = ThreatAwareSelectionPolicy()
+    a = policy.decision((my_team, opp_team), 4)
+    b = policy.decision((my_team, opp_team), 4)
+    assert a == b

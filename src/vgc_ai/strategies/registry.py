@@ -34,6 +34,7 @@ from vgc_ai.policies.rule_balance import DefaultRuleBalancePolicy
 from vgc_ai.policies.selection import (
     MatchupAwareSelectionPolicy,
     MetaWeightedSelectionPolicy,
+    ThreatAwareSelectionPolicy,
 )
 from vgc_ai.policies.tabular_mc import TabularMCBattlePolicy
 from vgc_ai.policies.teambuild import (
@@ -120,6 +121,22 @@ CHAMPIONSHIP_STRATEGIES: dict[str, ChampionshipStrategy] = {
             name="minimax+meta_weighted_selection",
             team_build_policy=MinimaxTeamBuildPolicy,
             selection_policy=MetaWeightedSelectionPolicy,
+        ),
+        # Same LP-minimax team builder as the current default; the
+        # differentiator is the selection layer, which replaces the
+        # symmetric mean over opp defenses with the max threat.
+        # In doubles a single 2x super-effective opp one-shots the
+        # lead, so the worst-case threat dominates survival in
+        # practice. The mean-defense view systematically underweights
+        # spiky threat profiles (one big threat plus neutral noise);
+        # max-defense captures that as the full multiplier rather
+        # than its share of the average. No meta dependency, no
+        # extra precompute; strict alternative (not a generalisation)
+        # to MatchupAwareSelectionPolicy.
+        ChampionshipStrategy(
+            name="minimax+threat_aware_selection",
+            team_build_policy=MinimaxTeamBuildPolicy,
+            selection_policy=ThreatAwareSelectionPolicy,
         ),
     )
 }

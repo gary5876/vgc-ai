@@ -35,6 +35,15 @@ back to ``MatchupAwareSelectionPolicy``'s uniform behavior whenever the
 meta is absent / empty / yields ``ZeroDivisionError`` (same epoch-0
 defense as ``teambuild._species_priority``).
 
+
+``ThreatAwareSelectionPolicy`` replaces the mean over opp defense
+threats with a max. In doubles, the slow-grind-mean view systematically
+misranks members who are statistically OK on average but get one-shot
+by a single super-effective opp threat: only one threat needs to land
+to remove a lead. Max defense gives ``(mean_offense - max_defense)``,
+which is a strictly more conservative (and theoretically correct)
+lead-survival proxy than the parent symmetric mean-mean score.
+
 Negative results recorded (so future tuners don't repeat them):
 
 - Singleton (``n_active=1``) matchup table for scoring: -90 ELO mean over
@@ -204,10 +213,73 @@ class MetaWeightedSelectionPolicy(MatchupAwareSelectionPolicy):
         return ordered[:max_size]
 
 
+def _threat_aware_selection_score(
+    my_pkm: Pokemon,
+    opp_team: Team,
+    params: BattleRuleParam,
+) -> float:
+    """(mean_offense - max_defense) net score for my_pkm vs opp_team.
+
+    Same offense signal as _selection_score -- mean best-multiplier vs
+    each opp -- but the defense signal is the worst-case rather than
+    the mean. The mean defense smooths multiple threats; in doubles a
+    single super-effective opp can one-shot a lead, so the worst-case
+    threat dominates survival in practice. Returns 0.0 on an empty opp
+    team, matching the parent for the degenerate case.
+    """
+    if not opp_team.members:
+        return 0.0
+    offense_total = 0.0
+    max_defense = 0.0
+    for opp in opp_team.members:
+        offense_total += _best_offense_multiplier(my_pkm, opp, params)
+        threat = _best_offense_multiplier(opp, my_pkm, params)
+        if threat > max_defense:
+            max_defense = threat
+    n = len(opp_team.members)
+    return (offense_total / n) - max_defense
+
+
+class ThreatAwareSelectionPolicy(MatchupAwareSelectionPolicy):
+    """Order team members by (mean_offense - max_defense) vs the opp team.
+
+    Same offense primitive as MatchupAwareSelectionPolicy (mean of
+    best-multiplier vs each opp), but the defense term is the **maximum**
+    threat across the opp team rather than the mean. The mean defense
+    treats a team with one 2x-effective sweeper the same as a team with
+    four neutral attackers as long as the average comes out equal; in
+    doubles, the single 2x sweeper one-shots the lead. max_defense
+    catches that -- a lead with a 2x-effective threat against it gets
+    penalised the full 2.0, not a 0.5 share of it.
+
+    No meta dependency, no extra precompute, no fallback machinery: the
+    score is a pure function of the two teams' type signatures and the
+    rule params, so this policy works identically at epoch 0 of every
+    championship. Strict alternative to the parent (not a generalisation):
+    the rankings differ whenever any opp member is a strictly worse
+    matchup against one of our members than the mean suggests.
+    """
+
+    def decision(self, teams: tuple[Team, Team], max_size: int) -> SelectionCommand:
+        my_team, opp_team = teams
+        params: BattleRuleParam = self.params
+        scored = [
+            (
+                -_threat_aware_selection_score(p, opp_team, params),
+                i,
+            )
+            for i, p in enumerate(my_team.members)
+        ]
+        scored.sort()
+        ordered = [i for _, i in scored]
+        return ordered[:max_size]
+
+
 VgcAiSelectionPolicy = MatchupAwareSelectionPolicy
 
 __all__ = [
     "MatchupAwareSelectionPolicy",
     "MetaWeightedSelectionPolicy",
+    "ThreatAwareSelectionPolicy",
     "VgcAiSelectionPolicy",
 ]
