@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import csv
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -264,3 +265,181 @@ def test_main_dry_run_prints_prompt_and_does_not_invoke(
     out = capsys.readouterr().out
     # The dry-run path prints the prompt to stdout.
     assert "NEW COMPOUND" in out
+
+
+# ---- has_new_signal -----------------------------------------------------
+
+
+def _write_attempts(path: Path, rows: list[dict[str, str]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(["timestamp", "track", "compound_name", "exit_code"])
+        for r in rows:
+            w.writerow([r[k] for k in ["timestamp", "track", "compound_name", "exit_code"]])
+
+
+def test_has_new_signal_fires_when_no_prior_attempts(tmp_path: Path) -> None:
+    ok, reason = proposer.has_new_signal(tmp_path / "nope.csv")
+    assert ok is True
+    assert "no prior attempts" in reason
+
+
+def test_has_new_signal_fires_on_previous_failure(tmp_path: Path) -> None:
+    """Even if the last attempt was 1s ago, if it FAILED we retry —
+    Claude has new failure context to work with."""
+    path = tmp_path / "attempts.csv"
+    one_second_ago = (datetime.now(UTC) - timedelta(seconds=1)).isoformat(timespec="seconds")
+    _write_attempts(
+        path,
+        [
+            {
+                "timestamp": one_second_ago,
+                "track": "battle",
+                "compound_name": "foo",
+                "exit_code": "1",
+            }
+        ],
+    )
+    ok, reason = proposer.has_new_signal(path)
+    assert ok is True
+    assert "exited 1" in reason
+
+
+def test_has_new_signal_skips_when_too_recent_success(tmp_path: Path) -> None:
+    """A successful attempt 60s ago must NOT trigger another fire (less
+    than the 30-min default interval). Bench loop hasn't measured the
+    new compound yet."""
+
+    path = tmp_path / "attempts.csv"
+    one_minute_ago = (datetime.now(UTC) - timedelta(seconds=60)).isoformat(timespec="seconds")
+    _write_attempts(
+        path,
+        [
+            {
+                "timestamp": one_minute_ago,
+                "track": "battle",
+                "compound_name": "foo",
+                "exit_code": "0",
+            }
+        ],
+    )
+    ok, reason = proposer.has_new_signal(path)
+    assert ok is False
+    assert "only" in reason
+
+
+def test_has_new_signal_fires_when_min_interval_elapsed(tmp_path: Path) -> None:
+
+    path = tmp_path / "attempts.csv"
+    long_ago = (datetime.now(UTC) - timedelta(hours=2)).isoformat(timespec="seconds")
+    _write_attempts(
+        path,
+        [
+            {
+                "timestamp": long_ago,
+                "track": "battle",
+                "compound_name": "foo",
+                "exit_code": "0",
+            }
+        ],
+    )
+    ok, reason = proposer.has_new_signal(path, min_interval_sec=1800)
+    assert ok is True
+    assert "threshold" in reason
+
+
+def test_has_new_signal_fires_on_unparseable_timestamp(tmp_path: Path) -> None:
+    path = tmp_path / "attempts.csv"
+    _write_attempts(
+        path,
+        [
+            {
+                "timestamp": "definitely-not-iso",
+                "track": "battle",
+                "compound_name": "foo",
+                "exit_code": "0",
+            }
+        ],
+    )
+    ok, reason = proposer.has_new_signal(path)
+    assert ok is True
+    assert "unparseable" in reason
+
+
+def test_main_skips_when_no_signal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """End-to-end: a recent successful attempt blocks the next fire."""
+
+    monkeypatch.setattr(proposer, "list_open_reviewer_prs", lambda: [])
+    monkeypatch.setattr(proposer, "daily_claude_calls", lambda *_a, **_k: 0)
+    monkeypatch.setattr(
+        proposer,
+        "invoke_claude",
+        lambda *a, **k: pytest.fail("must not invoke claude when signal gate skips"),
+    )
+
+    attempts = tmp_path / "attempts.csv"
+    recent = (datetime.now(UTC) - timedelta(seconds=120)).isoformat(timespec="seconds")
+    _write_attempts(
+        attempts,
+        [{"timestamp": recent, "track": "battle", "compound_name": "foo", "exit_code": "0"}],
+    )
+
+    rc = proposer.main(
+        [
+            "--csv-dir",
+            str(tmp_path),
+            "--budget",
+            str(tmp_path / "b.csv"),
+            "--attempts",
+            str(attempts),
+            "--min-interval",
+            "1800",
+        ]
+    )
+    assert rc == 0
+    assert "skipping" in capsys.readouterr().err
+
+
+# ---- build_prompt last-attempt status -----------------------------------
+
+
+def test_build_prompt_announces_last_failure() -> None:
+    attempts = [
+        {
+            "timestamp": "2026-05-20T08:00:00+00:00",
+            "track": "battle",
+            "compound_name": "broken_thing",
+            "exit_code": "1",
+        }
+    ]
+    prompt = proposer.build_prompt(
+        "battle",
+        {"battle": {"default": "heur", "candidates": [], "rows_seen": 0}},
+        attempts,
+    )
+    assert "Last attempt FAILED" in prompt
+    assert "broken_thing" in prompt
+
+
+def test_build_prompt_announces_last_success_and_warns_against_duplicates() -> None:
+    attempts = [
+        {
+            "timestamp": "2026-05-20T08:00:00+00:00",
+            "track": "battle",
+            "compound_name": "great_thing",
+            "exit_code": "0",
+        }
+    ]
+    prompt = proposer.build_prompt(
+        "battle",
+        {"battle": {"default": "heur", "candidates": [], "rows_seen": 0}},
+        attempts,
+    )
+    assert "Last attempt SUCCEEDED" in prompt
+    assert "great_thing" in prompt
+    assert "different angle" in prompt
