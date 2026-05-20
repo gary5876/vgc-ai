@@ -1,24 +1,27 @@
-"""PR auto-handler — adjudicates reviewer-opened PRs within the 5-min SLA.
+"""PR auto-handler — adjudicates loop-opened PRs within the 5-min SLA.
 
 Polls open PRs once per cycle (driver runs at ~1-min cadence on the VM).
-For each PR whose body contains the ``BENCH GATE`` marker, runs:
+Two PR classes are recognized by body markers:
 
-1. **Age check** — wait if PR is younger than ``min_age_sec`` (PR may still
-   be in the middle of being created by Claude).
-2. **Scope check** — the diff must touch only paths from a small allowed
-   list (registry default-swap + maybe a battle.py alias). Anything else
-   gets closed as out-of-scope.
-3. **CI gate** — ``ruff format --check``, ``ruff check``, ``mypy --strict``,
-   ``pytest`` all green.
-4. **Bench-gate re-verification** — the reviewer fired based on CSV
-   evidence at PR open. By the time the handler runs, more tournament
-   rows have accumulated. Re-pool and confirm the gate STILL fires; if
-   the signal degraded between PR open and now, close.
+- ``BENCH GATE`` — a reviewer-opened *default-swap* PR. Tight scope
+  (only ``registry.py`` + ``battle.py``). Requires the bench gate to
+  STILL fire when re-evaluated against current CSV rows.
+- ``NEW COMPOUND`` — a proposer-opened *new-strategy* PR. Wider scope
+  (any path under ``src/vgc_ai/policies/``, ``src/vgc_ai/eval/``,
+  ``src/vgc_ai/strategies/``, or ``tests/``). No bench re-verification —
+  the compound is brand new and hasn't been benched yet; CI alone gates.
 
-All four checks are pure-Python; zero Claude tokens are spent. Decision
-per PR is ``merge`` / ``close`` / ``wait``.
+Common gates for both classes:
 
-The driver loop lives in ``ops/run_pr_handler.sh``.
+1. **Age check** — wait if PR is younger than ``min_age_sec`` (PR may
+   still be mid-creation).
+2. **Scope check** — diff must stay within the class's allowed paths.
+3. **CI gate** — ``ruff format --check``, ``ruff check``,
+   ``mypy --strict``, ``pytest`` all green.
+
+All gates are pure Python; zero Claude tokens are spent. Decision per PR
+is ``merge`` / ``close`` / ``wait``. The driver lives in
+``ops/run_pr_handler.sh``.
 """
 
 from __future__ import annotations
@@ -41,10 +44,28 @@ from vgc_ai.reviewer import (
 DEFAULT_MIN_AGE_SEC = 30
 DEFAULT_MAX_AGE_SEC = 300  # 5-min SLA
 DEFAULT_CMD_TIMEOUT_SEC = 600
-DEFAULT_ALLOWED_PATHS: tuple[str, ...] = (
+
+# BENCH GATE (default-swap) PRs: tight whitelist by exact path.
+BENCH_GATE_ALLOWED_PATHS: tuple[str, ...] = (
     "src/vgc_ai/strategies/registry.py",
     "src/vgc_ai/policies/battle.py",
 )
+
+# NEW COMPOUND PRs: any file whose path begins with one of these prefixes.
+# Excludes ops/, bench/, scripts/, .github/, top-level — those are loop
+# infrastructure or repo metadata that proposer-implementations should
+# never touch.
+NEW_COMPOUND_ALLOWED_PREFIXES: tuple[str, ...] = (
+    "src/vgc_ai/policies/",
+    "src/vgc_ai/eval/",
+    "src/vgc_ai/strategies/",
+    "tests/",
+)
+
+NEW_COMPOUND_MARKER = "NEW COMPOUND"
+
+# Backwards-compatible alias used by older callers and tests.
+DEFAULT_ALLOWED_PATHS = BENCH_GATE_ALLOWED_PATHS
 
 CmdRunner = Callable[[list[str], Path, int], "tuple[int, str, str]"]
 GhRunner = Callable[[list[str]], str]
@@ -62,29 +83,30 @@ def _default_cmd_runner(cmd: list[str], cwd: Path, timeout: int) -> tuple[int, s
     return result.returncode, result.stdout, result.stderr
 
 
-def parse_bench_gate(body: str) -> dict[str, str] | None:
-    r"""Extract the ``BENCH GATE`` key-value block from a PR body.
+def _parse_marker_block(body: str, marker: str) -> dict[str, str] | None:
+    r"""Find ``marker`` as the sole content of a line (modulo whitespace), then
+    parse subsequent ``k=v`` lines until a blank or non-``k=v`` line.
 
-    Block shape (the reviewer's prompt template demands this exact form):
+    Strict on the marker line: the marker must be the entire stripped
+    content. Mentioning the marker text inside markdown formatting
+    (``\`BENCH GATE\```, table cells, prose) will NOT trigger detection.
+    This prevents the false-positive where a PR's prose mentions the
+    marker and the handler treats it as a loop PR.
 
-        BENCH GATE
-        track=battle
-        candidate=foo
-        default=bar
-        pooled_n=100
-        pooled_wins=70
-        ci95_low=0.60
-        ci95_high=0.78
-
-    Tolerant of an enclosing markdown code fence: lines starting with
-    ``\`\`\``` are skipped. Stops at the first blank or non-``k=v`` line
-    after parsing began.
+    Tolerant inside the block: a leading markdown code fence
+    (``\`\`\``) is skipped if it immediately follows the marker; blank
+    lines inside the block end parsing as before.
     """
-    if BENCH_GATE_MARKER not in body:
+    lines = body.splitlines()
+    start: int | None = None
+    for i, raw in enumerate(lines):
+        if raw.strip() == marker:
+            start = i + 1
+            break
+    if start is None:
         return None
-    tail = body.split(BENCH_GATE_MARKER, 1)[1]
     parsed: dict[str, str] = {}
-    for raw in tail.splitlines():
+    for raw in lines[start:]:
         line = raw.strip()
         if not line:
             if parsed:
@@ -106,12 +128,54 @@ def parse_bench_gate(body: str) -> dict[str, str] | None:
     return parsed or None
 
 
+def parse_bench_gate(body: str) -> dict[str, str] | None:
+    """Extract the ``BENCH GATE`` key-value block from a PR body.
+
+    Detection is strict: ``BENCH GATE`` must appear as the sole content
+    of a line (after stripping). Mentions inside markdown formatting do
+    not match. See ``_parse_marker_block`` for the full block grammar.
+    """
+    return _parse_marker_block(body, BENCH_GATE_MARKER)
+
+
+def parse_new_compound(body: str) -> dict[str, str] | None:
+    """Extract the ``NEW COMPOUND`` key-value block from a PR body.
+
+    Detection is strict (see ``parse_bench_gate``): ``NEW COMPOUND`` must
+    appear as the sole content of a line. Mentions inside markdown
+    formatting do not match.
+    """
+    return _parse_marker_block(body, NEW_COMPOUND_MARKER)
+
+
 def scope_check(
     changed_paths: list[str],
-    allowed: tuple[str, ...] = DEFAULT_ALLOWED_PATHS,
+    allowed: tuple[str, ...] = BENCH_GATE_ALLOWED_PATHS,
 ) -> tuple[bool, str]:
-    """All ``changed_paths`` must be in ``allowed``. Returns ``(ok, reason)``."""
+    """All ``changed_paths`` must be in ``allowed`` (exact match).
+
+    Used for ``BENCH GATE`` PRs — the diff should be a tiny, predictable
+    constant swap and possibly a battle-policy alias update.
+    """
     out_of_scope = [p for p in changed_paths if p not in allowed]
+    if out_of_scope:
+        return False, f"out-of-scope paths touched: {out_of_scope}"
+    return True, ""
+
+
+def scope_check_prefix(
+    changed_paths: list[str],
+    allowed_prefixes: tuple[str, ...] = NEW_COMPOUND_ALLOWED_PREFIXES,
+) -> tuple[bool, str]:
+    """Every path must start with one of ``allowed_prefixes``.
+
+    Used for ``NEW COMPOUND`` PRs — the proposer may add new policy
+    files, new tests, new eval helpers, but cannot touch ops/, bench/,
+    scripts/, .github/, or top-level config.
+    """
+    out_of_scope = [
+        p for p in changed_paths if not any(p.startswith(pfx) for pfx in allowed_prefixes)
+    ]
     if out_of_scope:
         return False, f"out-of-scope paths touched: {out_of_scope}"
     return True, ""
@@ -154,8 +218,24 @@ def parse_pr_age_seconds(created_at: str) -> float:
     return (datetime.now(UTC) - dt).total_seconds()
 
 
+def _has_handler_marker(body: str) -> bool:
+    """Return True iff a marker appears as the sole content of some line.
+
+    Strict by design — prose mentions of ``BENCH GATE`` or ``NEW COMPOUND``
+    in markdown formatting must not trigger handler attention. The PR
+    that initially added this strict check was itself closed by the old
+    looser handler because its description mentioned the markers in
+    backticks and table cells; this stricter check prevents recurrence.
+    """
+    for raw in body.splitlines():
+        stripped = raw.strip()
+        if stripped in (BENCH_GATE_MARKER, NEW_COMPOUND_MARKER):
+            return True
+    return False
+
+
 def list_matching_prs(gh_runner: GhRunner | None = None) -> list[dict[str, Any]]:
-    """Open PRs whose body contains ``BENCH GATE``, with files + createdAt."""
+    """Open PRs whose body contains either ``BENCH GATE`` or ``NEW COMPOUND``."""
     runner = gh_runner or _default_gh_runner
     try:
         raw = runner(
@@ -176,7 +256,7 @@ def list_matching_prs(gh_runner: GhRunner | None = None) -> list[dict[str, Any]]
         data = json.loads(raw)
     except json.JSONDecodeError:
         return []
-    return [item for item in data if BENCH_GATE_MARKER in (item.get("body") or "")]
+    return [item for item in data if _has_handler_marker(item.get("body") or "")]
 
 
 def run_ci_gate(
@@ -206,21 +286,30 @@ def evaluate_pr(
     *,
     min_age_sec: int = DEFAULT_MIN_AGE_SEC,
     max_age_sec: int = DEFAULT_MAX_AGE_SEC,
-    allowed_paths: tuple[str, ...] = DEFAULT_ALLOWED_PATHS,
+    allowed_paths: tuple[str, ...] = BENCH_GATE_ALLOWED_PATHS,
+    allowed_prefixes: tuple[str, ...] = NEW_COMPOUND_ALLOWED_PREFIXES,
     cmd_runner: CmdRunner | None = None,
 ) -> tuple[str, str]:
-    """Decide what to do with a single PR.
+    """Decide what to do with a single PR — handles both PR classes.
 
     Returns ``(action, reason)`` where ``action`` is one of:
 
     - ``"merge"`` — all gates green, ready to merge.
     - ``"close"`` — at least one gate failed terminally (or SLA expired).
     - ``"wait"`` — too young, or CI flaked and SLA hasn't expired yet.
+
+    The marker class determines which scope check applies and whether the
+    bench-gate re-verification runs:
+
+    - ``BENCH GATE``: ``scope_check`` (exact-path), bench re-verify required.
+    - ``NEW COMPOUND``: ``scope_check_prefix`` (path-prefix), no bench
+      re-verification (the compound hasn't been benched yet).
     """
     body = pr.get("body") or ""
-    parsed = parse_bench_gate(body)
-    if parsed is None:
-        return "close", "PR body missing BENCH GATE block"
+    bench_block = parse_bench_gate(body)
+    new_block = parse_new_compound(body)
+    if bench_block is None and new_block is None:
+        return "close", "PR body missing BENCH GATE or NEW COMPOUND block"
 
     created_at = pr.get("createdAt") or ""
     if not created_at:
@@ -231,7 +320,10 @@ def evaluate_pr(
         return "wait", f"PR is only {age:.0f}s old (min_age={min_age_sec})"
 
     changed = [f.get("path", "") for f in pr.get("files", [])]
-    ok, reason = scope_check(changed, allowed_paths)
+    if bench_block is not None:
+        ok, reason = scope_check(changed, allowed_paths)
+    else:
+        ok, reason = scope_check_prefix(changed, allowed_prefixes)
     if not ok:
         return "close", reason
 
@@ -241,9 +333,13 @@ def evaluate_pr(
             return "close", f"CI gate failed after {age:.0f}s (SLA={max_age_sec}): {reason}"
         return "wait", f"CI failing, age {age:.0f}s, retry next cycle: {reason}"
 
-    ok, reason = bench_gate_still_fires(parsed, csv_dir)
-    if not ok:
-        return "close", f"bench gate re-check failed: {reason}"
+    # Bench-gate re-verification is BENCH-GATE-only. NEW COMPOUND PRs add
+    # untested entries — they have no bench history yet, so re-verify is
+    # not applicable; the bench loop will measure them after merge.
+    if bench_block is not None:
+        ok, reason = bench_gate_still_fires(bench_block, csv_dir)
+        if not ok:
+            return "close", f"bench gate re-check failed: {reason}"
 
     return "merge", "all gates passed"
 

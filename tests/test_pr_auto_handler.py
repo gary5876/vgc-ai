@@ -402,3 +402,237 @@ def test_main_dry_run_does_not_call_merge_or_close(
 
     rc = handler.main(["--dry-run", "--csv-dir", str(tmp_path), "--workdir", str(tmp_path)])
     assert rc == 0
+
+
+# ---- NEW COMPOUND PR class ----------------------------------------------
+
+
+def test_parse_new_compound_extracts_block() -> None:
+    body = """## Summary
+
+NEW COMPOUND
+track=battle
+compound_name=heuristic_det_damage_term
+rationale=Adds a base_power-weighted damage term to evaluate()
+
+Some trailing text.
+"""
+    parsed = handler.parse_new_compound(body)
+    assert parsed == {
+        "track": "battle",
+        "compound_name": "heuristic_det_damage_term",
+        "rationale": "Adds a base_power-weighted damage term to evaluate()",
+    }
+
+
+def test_parse_new_compound_returns_none_when_marker_absent() -> None:
+    assert handler.parse_new_compound("only BENCH GATE here\ntrack=x") is None
+
+
+def test_scope_check_prefix_passes_for_allowed_prefixes() -> None:
+    ok, reason = handler.scope_check_prefix(
+        [
+            "src/vgc_ai/policies/new_policy.py",
+            "src/vgc_ai/eval/new_term.py",
+            "tests/test_new_policy.py",
+            "src/vgc_ai/strategies/registry.py",
+        ]
+    )
+    assert ok is True
+    assert reason == ""
+
+
+def test_scope_check_prefix_rejects_ops_and_bench() -> None:
+    ok, reason = handler.scope_check_prefix(
+        ["src/vgc_ai/policies/new_policy.py", "ops/some_script.sh"]
+    )
+    assert ok is False
+    assert "ops/" in reason
+
+
+def test_scope_check_prefix_rejects_toplevel() -> None:
+    ok, reason = handler.scope_check_prefix(["README.md", "src/vgc_ai/policies/x.py"])
+    assert ok is False
+    assert "README.md" in reason
+
+
+def test_list_matching_prs_includes_both_markers() -> None:
+    response = json.dumps(
+        [
+            {"number": 1, "body": "BENCH GATE\ntrack=battle", "files": [], "createdAt": "x"},
+            {"number": 2, "body": "NEW COMPOUND\ntrack=battle", "files": [], "createdAt": "x"},
+            {"number": 3, "body": "neither marker", "files": [], "createdAt": "x"},
+        ]
+    )
+
+    def fake_gh(cmd: list[str]) -> str:
+        return response
+
+    prs = handler.list_matching_prs(gh_runner=fake_gh)
+    assert sorted(p["number"] for p in prs) == [1, 2]
+
+
+def _new_compound_pr(
+    *,
+    number: int = 99,
+    body: str | None = None,
+    files: list[dict[str, str]] | None = None,
+    age_seconds: float = 120,
+) -> dict[str, Any]:
+    if body is None:
+        body = (
+            "NEW COMPOUND\n"
+            "track=battle\n"
+            "compound_name=heuristic_det_damage_term\n"
+            "rationale=adds a damage term\n"
+        )
+    if files is None:
+        files = [
+            {"path": "src/vgc_ai/policies/heuristic_det_damage.py"},
+            {"path": "src/vgc_ai/strategies/registry.py"},
+            {"path": "tests/test_heuristic_det_damage.py"},
+        ]
+    created_at = (datetime.now(UTC) - timedelta(seconds=age_seconds)).isoformat()
+    return {"number": number, "body": body, "files": files, "createdAt": created_at}
+
+
+def test_evaluate_pr_new_compound_merges_when_ci_green(tmp_path: Path) -> None:
+    """NEW COMPOUND PR with allowed-prefix files and green CI must merge.
+
+    No bench re-verification — the compound is brand new and has no
+    bench history yet. Only CI gates it.
+    """
+
+    def green_ci(cmd: list[str], cwd: Path, timeout: int) -> tuple[int, str, str]:
+        return (0, "", "")
+
+    pr = _new_compound_pr()
+    action, reason = handler.evaluate_pr(pr, tmp_path, tmp_path, cmd_runner=green_ci)
+    assert action == "merge"
+    assert reason == "all gates passed"
+
+
+def test_evaluate_pr_new_compound_closes_on_out_of_scope_file(tmp_path: Path) -> None:
+    pr = _new_compound_pr(
+        files=[
+            {"path": "src/vgc_ai/policies/x.py"},
+            {"path": "ops/some_script.sh"},
+        ]
+    )
+
+    def green_ci(cmd: list[str], cwd: Path, timeout: int) -> tuple[int, str, str]:
+        return (0, "", "")
+
+    action, reason = handler.evaluate_pr(pr, tmp_path, tmp_path, cmd_runner=green_ci)
+    assert action == "close"
+    assert "ops/" in reason
+
+
+def test_evaluate_pr_new_compound_closes_on_ci_fail_past_sla(tmp_path: Path) -> None:
+    def red_ci(cmd: list[str], cwd: Path, timeout: int) -> tuple[int, str, str]:
+        return (1, "", "pytest exit 1")
+
+    pr = _new_compound_pr(age_seconds=400)
+    action, reason = handler.evaluate_pr(pr, tmp_path, tmp_path, max_age_sec=300, cmd_runner=red_ci)
+    assert action == "close"
+    assert "SLA=300" in reason
+
+
+def test_evaluate_pr_new_compound_does_not_run_bench_recheck(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """NEW COMPOUND PRs must NOT call bench_gate_still_fires (the new
+    compound has no bench history to verify against)."""
+
+    def fail_if_called(*a: Any, **k: Any) -> tuple[bool, str]:
+        pytest.fail("bench_gate_still_fires must not be called for NEW COMPOUND PRs")
+
+    monkeypatch.setattr(handler, "bench_gate_still_fires", fail_if_called)
+
+    def green_ci(cmd: list[str], cwd: Path, timeout: int) -> tuple[int, str, str]:
+        return (0, "", "")
+
+    pr = _new_compound_pr()
+    action, _ = handler.evaluate_pr(pr, tmp_path, tmp_path, cmd_runner=green_ci)
+    assert action == "merge"
+
+
+def test_evaluate_pr_closes_when_body_has_neither_marker(tmp_path: Path) -> None:
+    pr = {
+        "number": 1,
+        "body": "just a regular PR with no marker",
+        "files": [{"path": "src/vgc_ai/policies/x.py"}],
+        "createdAt": (datetime.now(UTC) - timedelta(seconds=120)).isoformat(),
+    }
+    action, reason = handler.evaluate_pr(pr, tmp_path, tmp_path)
+    assert action == "close"
+    assert "missing BENCH GATE or NEW COMPOUND" in reason
+
+
+# ---- marker false-positive guard (regression: PR #30 was wrongly closed
+#      by the looser handler because its description mentioned the marker
+#      inside markdown code spans and table cells) -------------------------
+
+
+def test_parse_bench_gate_ignores_marker_in_backticks() -> None:
+    """A prose PR description that says `BENCH GATE` in backticks must
+    NOT be treated as a BENCH GATE PR. The marker only matches as the
+    sole content of a line."""
+    body = "The handler accepts `BENCH GATE` and `NEW COMPOUND` PRs.\n\nSummary..."
+    assert handler.parse_bench_gate(body) is None
+
+
+def test_parse_bench_gate_ignores_marker_in_table_cell() -> None:
+    body = "| Class | Marker |\n|---|---|\n| Swap | `BENCH GATE` |\n"
+    assert handler.parse_bench_gate(body) is None
+
+
+def test_parse_new_compound_ignores_marker_in_backticks() -> None:
+    body = "PR body with `NEW COMPOUND` referenced inline."
+    assert handler.parse_new_compound(body) is None
+
+
+def test_has_handler_marker_strict_against_prose() -> None:
+    body = (
+        "## Two PR classes\n\n"
+        "The handler accepts `BENCH GATE` (default-swap) and `NEW COMPOUND` (proposer) PRs.\n"
+        "Neither marker is on its own line; this PR is infrastructure-only.\n"
+    )
+    assert handler._has_handler_marker(body) is False
+
+
+def test_has_handler_marker_matches_marker_on_own_line() -> None:
+    body = "## Summary\n\nBENCH GATE\ntrack=battle\ncandidate=x\n"
+    assert handler._has_handler_marker(body) is True
+
+
+def test_has_handler_marker_matches_marker_with_leading_whitespace() -> None:
+    body = "Header\n\n   BENCH GATE\ntrack=battle\n"
+    assert handler._has_handler_marker(body) is True
+
+
+def test_list_matching_prs_skips_prose_mentions() -> None:
+    """The PR-#30 regression: a PR description that *mentions* the marker
+    in backticks/tables/etc must not be matched."""
+    response = json.dumps(
+        [
+            {
+                "number": 30,
+                "body": "## Summary\n\nThis PR widens scope. It teaches the handler to recognize `BENCH GATE` and `NEW COMPOUND` PR classes.\n",
+                "files": [],
+                "createdAt": "x",
+            },
+            {
+                "number": 31,
+                "body": "## Summary\n\nReal proposer PR.\n\nBENCH GATE\ntrack=battle\ncandidate=foo\n",
+                "files": [],
+                "createdAt": "x",
+            },
+        ]
+    )
+
+    def fake_gh(cmd: list[str]) -> str:
+        return response
+
+    prs = handler.list_matching_prs(gh_runner=fake_gh)
+    assert [p["number"] for p in prs] == [31]
