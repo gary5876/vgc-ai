@@ -204,10 +204,134 @@ class MetaWeightedSelectionPolicy(MatchupAwareSelectionPolicy):
         return ordered[:max_size]
 
 
+def _meta_threat_aware_selection_score(
+    my_pkm: Pokemon,
+    opp_team: Team,
+    weights: list[float],
+    params: BattleRuleParam,
+) -> float:
+    """Usage-weighted offense minus worst-case threat.
+
+    Composes two single-axis enhancements over ``MatchupAwareSelectionPolicy``:
+
+    - offense term: ``sum_j w_j * best_offense(my, opp_j)`` -- the same
+      usage-weighted mean that ``MetaWeightedSelectionPolicy`` uses, so
+      high-usage opp species drive the offense signal more than rare ones
+      (the opp is more likely to actually field a high-usage species).
+    - defense term: ``max_j best_offense(opp_j, my)`` -- worst-case
+      threat across the opp team. The max isn't usage-weighted on
+      purpose: a 2x super-effective threat that one-shots the lead
+      still removes the lead even if the opp's usage rate of it is
+      below average -- damage doesn't get diluted by usage probability
+      once the species is on the field.
+
+    ``weights`` must already sum to 1; computed once per ``decision`` call
+    by ``_opp_usage_weights``. Returns 0.0 on an empty opp team (matches
+    the parent for the degenerate case).
+    """
+    if not opp_team.members:
+        return 0.0
+    weighted_offense = 0.0
+    max_defense = 0.0
+    for opp, w in zip(opp_team.members, weights, strict=True):
+        weighted_offense += w * _best_offense_multiplier(my_pkm, opp, params)
+        threat = _best_offense_multiplier(opp, my_pkm, params)
+        if threat > max_defense:
+            max_defense = threat
+    return weighted_offense - max_defense
+
+
+def _threat_aware_uniform_score(
+    my_pkm: Pokemon,
+    opp_team: Team,
+    params: BattleRuleParam,
+) -> float:
+    """(mean_offense - max_defense) net score; the meta-absent fallback path.
+
+    Same offense signal as ``_selection_score`` -- mean of best-multiplier
+    vs each opp -- but the defense signal is the worst-case max rather
+    than the mean. Used by ``MetaThreatAwareSelectionPolicy`` whenever the
+    meta has no usable data yet (epoch 0). Returns 0.0 on an empty opp
+    team.
+    """
+    if not opp_team.members:
+        return 0.0
+    offense_total = 0.0
+    max_defense = 0.0
+    for opp in opp_team.members:
+        offense_total += _best_offense_multiplier(my_pkm, opp, params)
+        threat = _best_offense_multiplier(opp, my_pkm, params)
+        if threat > max_defense:
+            max_defense = threat
+    return (offense_total / len(opp_team.members)) - max_defense
+
+
+class MetaThreatAwareSelectionPolicy(MatchupAwareSelectionPolicy):
+    """Usage-weighted offense minus worst-case threat for the selection score.
+
+    Composes two single-axis improvements over the uniform mean-mean
+    parent (``MatchupAwareSelectionPolicy``):
+
+    - Usage-weighted offense (the ``MetaWeightedSelectionPolicy`` insight):
+      when the championship meta has populated usage data, weight the
+      opponent's members by ``meta.usage_rate_pokemon`` so the offense
+      term reflects which opp species the opponent is actually likely
+      to field, not a uniform mean over the listed roster.
+    - Worst-case (max) threat defense: in doubles a single 2x
+      super-effective opp one-shots the lead, so worst-case survival
+      dominates average matchup. Damage isn't diluted by the threat's
+      usage rate once it's on the field, so the max stays uniform
+      across opp members (the offense's usage weight doesn't carry
+      through to the defense term).
+
+    Falls back to (uniform_mean_offense - max_defense) whenever the
+    meta is absent or has no usable data yet (epoch 0,
+    ``ZeroDivisionError`` from ``BasicMeta.usage_rate_pokemon``, or
+    all-zero weights). So the worst case at epoch 0 is the uniform
+    threat-aware baseline, never a regression to the symmetric mean-mean
+    parent.
+
+    Theoretical leverage over the existing default:
+
+    - Offense: a 90%-usage staple drives the score 9x more than a
+      10%-usage curiosity, so leads that counter the actually-played
+      threats rank higher than under the uniform mean.
+    - Defense: a single 2x super-effective threat costs the full 2.0,
+      not its 1/N share of the mean -- correct because one threat is
+      enough to remove the lead in doubles.
+    """
+
+    def decision(self, teams: tuple[Team, Team], max_size: int) -> SelectionCommand:
+        my_team, opp_team = teams
+        weights = _opp_usage_weights(self._meta, opp_team)
+        params: BattleRuleParam = self.params
+        if weights is None:
+            scored_fb = [
+                (
+                    -_threat_aware_uniform_score(p, opp_team, params),
+                    i,
+                )
+                for i, p in enumerate(my_team.members)
+            ]
+            scored_fb.sort()
+            return [i for _, i in scored_fb][:max_size]
+        scored = [
+            (
+                -_meta_threat_aware_selection_score(p, opp_team, weights, params),
+                i,
+            )
+            for i, p in enumerate(my_team.members)
+        ]
+        scored.sort()
+        ordered = [i for _, i in scored]
+        return ordered[:max_size]
+
+
 VgcAiSelectionPolicy = MatchupAwareSelectionPolicy
 
 __all__ = [
     "MatchupAwareSelectionPolicy",
+    "MetaThreatAwareSelectionPolicy",
     "MetaWeightedSelectionPolicy",
     "VgcAiSelectionPolicy",
 ]

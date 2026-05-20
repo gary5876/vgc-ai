@@ -33,6 +33,7 @@ from vgc_ai.policies.meta_balance import NoOpMetaBalancePolicy
 from vgc_ai.policies.rule_balance import DefaultRuleBalancePolicy
 from vgc_ai.policies.selection import (
     MatchupAwareSelectionPolicy,
+    MetaThreatAwareSelectionPolicy,
     MetaWeightedSelectionPolicy,
 )
 from vgc_ai.policies.tabular_mc import TabularMCBattlePolicy
@@ -120,6 +121,22 @@ CHAMPIONSHIP_STRATEGIES: dict[str, ChampionshipStrategy] = {
             name="minimax+meta_weighted_selection",
             team_build_policy=MinimaxTeamBuildPolicy,
             selection_policy=MetaWeightedSelectionPolicy,
+        ),
+        # Same LP-minimax team builder as the current default; the
+        # differentiator is the selection layer, which composes two
+        # single-axis improvements: usage-weighted offense (the
+        # meta-weighted insight -- high-usage opp species drive the
+        # offense signal more than rare ones) AND max-threat defense
+        # (a single 2x super-effective opp one-shots the lead in
+        # doubles, so worst-case survival dominates average matchup).
+        # Falls back to (uniform_mean_offense - max_defense) when the
+        # meta has no usable data (epoch 0 of every championship), so
+        # the worst case at epoch 0 is the uniform threat-aware
+        # baseline.
+        ChampionshipStrategy(
+            name="minimax+meta_threat_aware_selection",
+            team_build_policy=MinimaxTeamBuildPolicy,
+            selection_policy=MetaThreatAwareSelectionPolicy,
         ),
     )
 }
