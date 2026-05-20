@@ -29,6 +29,7 @@ from vgc2.agent.selection import RandomSelectionPolicy
 from vgc2.agent.teambuild import RandomTeamBuildPolicy
 
 from vgc_ai.policies.heuristic_det import HeuristicDetBattlePolicy
+from vgc_ai.policies.library_teambuild import LibraryTeamBuildPolicy
 from vgc_ai.policies.meta_balance import NoOpMetaBalancePolicy
 from vgc_ai.policies.rule_balance import DefaultRuleBalancePolicy
 from vgc_ai.policies.selection import (
@@ -39,8 +40,10 @@ from vgc_ai.policies.selection import (
 from vgc_ai.policies.tabular_mc import TabularMCBattlePolicy
 from vgc_ai.policies.teambuild import (
     MatchupTableTeamBuildPolicy,
+    MetaCoverageTeamBuildPolicy,
     MetaUsageTeamBuildPolicy,
     MinimaxTeamBuildPolicy,
+    PrincipledCoverageTeamBuildPolicy,
 )
 
 BattlePolicyFactory = Callable[[], BattlePolicy]
@@ -137,6 +140,45 @@ CHAMPIONSHIP_STRATEGIES: dict[str, ChampionshipStrategy] = {
             name="minimax+meta_threat_aware_selection",
             team_build_policy=MinimaxTeamBuildPolicy,
             selection_policy=MetaThreatAwareSelectionPolicy,
+        ),
+        # Meta-usage-weighted greedy coverage team builder. With uniform
+        # weights (meta is None / epoch 0 / no usage signal) the first
+        # pick matches MatchupTableTeamBuildPolicy (both argmax the row
+        # mean); later picks may differ because MetaCoverage doesn't mask
+        # already-picked species from the score (the meta is the opponent
+        # distribution, not "opponents we haven't picked"). When the meta
+        # has signal, picks shift toward counters of high-usage opponents.
+        # Strategic insight: real opponents cluster around the empirical
+        # meta, not adversarially as MinimaxTeamBuildPolicy assumes.
+        ChampionshipStrategy(
+            name="meta_coverage+matchup_aware",
+            team_build_policy=MetaCoverageTeamBuildPolicy,
+            selection_policy=MatchupAwareSelectionPolicy,
+        ),
+        # Pre-computed library lookup with MetaCoverage fallback.
+        # data/team_library.json holds hand-curated teams keyed by
+        # roster fingerprint (Claude offline, 15-principle checklist).
+        # On a roster miss, falls back to MetaCoverageTeamBuildPolicy,
+        # which itself falls back to MatchupTable behaviour at epoch 0
+        # — so the worst case is parity with MetaCoverage above.
+        ChampionshipStrategy(
+            name="library+matchup_aware",
+            team_build_policy=LibraryTeamBuildPolicy,
+            selection_policy=MatchupAwareSelectionPolicy,
+        ),
+        # MetaCoverage + encoded subset of the 15-principle doubles
+        # checklist as additive bonuses (speed-control redundancy,
+        # status coverage, phys/spec split, type diversity, glass-cannon
+        # penalty). Same matchup-table cache, same meta weighting; bonuses
+        # bias close calls without overriding strong matchup scores.
+        # Sibling of meta_coverage+matchup_aware so the bench A/Bs them
+        # against the default; principles that vgc2 can't express
+        # (Fake Out, redirection, abilities, spread blockers) are
+        # intentionally omitted.
+        ChampionshipStrategy(
+            name="principled_coverage+matchup_aware",
+            team_build_policy=PrincipledCoverageTeamBuildPolicy,
+            selection_policy=MatchupAwareSelectionPolicy,
         ),
     )
 }

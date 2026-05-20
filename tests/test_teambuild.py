@@ -13,12 +13,17 @@ from vgc2.util.generator import gen_move_set, gen_pkm_roster
 
 from vgc_ai.policies.teambuild import (
     MatchupTableTeamBuildPolicy,
+    MetaCoverageTeamBuildPolicy,
     MetaUsageTeamBuildPolicy,
     MinimaxTeamBuildPolicy,
+    PrincipledCoverageTeamBuildPolicy,
     VgcAiTeamBuildPolicy,
+    _has_speed_control_move,
+    _has_status_move,
     _move_priority,
     _optimal_evs,
     _optimal_nature,
+    _principle_bonus,
     _solve_minimax_policy,
     _species_priority,
     _species_role,
@@ -272,3 +277,116 @@ def test_minimax_team_build_picks_max_team_size_entries() -> None:
 def test_minimax_handles_empty_roster() -> None:
     policy = MinimaxTeamBuildPolicy(n_battles_per_pair=2)
     assert policy.decision([], None, MAX_TEAM_SIZE, MAX_PKM_MOVES, N_ACTIVE) == []
+
+
+def test_meta_coverage_picks_max_team_size_entries() -> None:
+    _, roster = _make_roster(n_species=8)
+    policy = MetaCoverageTeamBuildPolicy(n_battles_per_pair=2)
+    cmd = policy.decision(roster, None, MAX_TEAM_SIZE, MAX_PKM_MOVES, N_ACTIVE)
+    assert len(cmd) == MAX_TEAM_SIZE
+    ids = [entry[0] for entry in cmd]
+    assert len(set(ids)) == len(ids)
+    assert all(0 <= i < len(roster) for i in ids)
+
+
+def test_meta_coverage_handles_empty_roster() -> None:
+    policy = MetaCoverageTeamBuildPolicy(n_battles_per_pair=2)
+    assert policy.decision([], None, MAX_TEAM_SIZE, MAX_PKM_MOVES, N_ACTIVE) == []
+
+
+def test_meta_coverage_with_none_meta_agrees_on_first_pick() -> None:
+    """Both policies argmax the row mean for the first pick. MatchupTable
+    masks already-picked species in later picks; MetaCoverage doesn't (the
+    meta is the opponent distribution, not 'opponents we haven't picked').
+    So later picks may diverge — only the first pick is a hard guarantee."""
+    _, roster = _make_roster(n_species=8)
+    mc = MetaCoverageTeamBuildPolicy(n_battles_per_pair=2)
+    mt = MatchupTableTeamBuildPolicy(n_battles_per_pair=2)
+    cmd_mc = mc.decision(roster, None, MAX_TEAM_SIZE, MAX_PKM_MOVES, N_ACTIVE)
+    cmd_mt = mt.decision(roster, None, MAX_TEAM_SIZE, MAX_PKM_MOVES, N_ACTIVE)
+    assert cmd_mc[0][0] == cmd_mt[0][0]
+
+
+def test_meta_coverage_with_skewed_meta_changes_picks() -> None:
+    """When the meta heavily concentrates on one opponent, the meta-weighted
+    picks must differ from the uniform-weighted picks (otherwise the meta
+    signal is being ignored)."""
+    move_set, roster = _make_roster(n_species=8)
+    meta = BasicMeta(move_set, roster)
+    # Concentrate all usage on species 0; non-empty record so usage_rate_pokemon
+    # doesn't ZeroDivisionError.
+    meta.pokemon_usage[0] = 1000
+    meta.record.append((None, 0, (1500, 1500)))  # type: ignore[arg-type]
+    policy = MetaCoverageTeamBuildPolicy(n_battles_per_pair=2)
+    cmd_uniform = policy.decision(roster, None, MAX_TEAM_SIZE, MAX_PKM_MOVES, N_ACTIVE)
+    cmd_skewed = policy.decision(roster, meta, MAX_TEAM_SIZE, MAX_PKM_MOVES, N_ACTIVE)
+    # Picks may overlap but the ordered tuple must not be identical — the
+    # meta signal has to influence at least one slot.
+    assert [e[0] for e in cmd_uniform] != [e[0] for e in cmd_skewed]
+
+
+def test_principle_bonus_empty_returns_zero() -> None:
+    _, roster = _make_roster(n_species=8)
+    assert _principle_bonus(roster, []) == 0.0
+
+
+def test_principle_bonus_returns_finite_float() -> None:
+    """For any subset of a real roster, the bonus must be a finite float in
+    a bounded range — never NaN, never raises."""
+    _, roster = _make_roster(n_species=12)
+    for picks in ([0], [0, 1], [0, 1, 2, 3], list(range(6))):
+        b = _principle_bonus(roster, picks)
+        assert isinstance(b, float)
+        # Tuning ranges from the docstring: max ~+0.26, min ~-0.10.
+        assert -0.5 < b < 0.5
+
+
+def test_principled_coverage_picks_max_team_size() -> None:
+    _, roster = _make_roster(n_species=8)
+    policy = PrincipledCoverageTeamBuildPolicy(n_battles_per_pair=2)
+    cmd = policy.decision(roster, None, MAX_TEAM_SIZE, MAX_PKM_MOVES, N_ACTIVE)
+    assert len(cmd) == MAX_TEAM_SIZE
+    ids = [entry[0] for entry in cmd]
+    assert len(set(ids)) == len(ids)
+    assert all(0 <= i < len(roster) for i in ids)
+
+
+def test_principled_coverage_handles_empty_roster() -> None:
+    policy = PrincipledCoverageTeamBuildPolicy(n_battles_per_pair=2)
+    assert policy.decision([], None, MAX_TEAM_SIZE, MAX_PKM_MOVES, N_ACTIVE) == []
+
+
+def test_principled_coverage_may_differ_from_meta_coverage() -> None:
+    """The principle bonus should at least sometimes shift picks vs
+    MetaCoverage on the same roster. Not a hard requirement — bonuses
+    can leave the argmax unchanged on every step — so this is a smoke
+    that the principled greedy ran at all and produced a legal team."""
+    _, roster = _make_roster(n_species=12, n_moves=24)
+    mc = MetaCoverageTeamBuildPolicy(n_battles_per_pair=2)
+    pc = PrincipledCoverageTeamBuildPolicy(n_battles_per_pair=2)
+    cmd_mc = mc.decision(roster, None, MAX_TEAM_SIZE, MAX_PKM_MOVES, N_ACTIVE)
+    cmd_pc = pc.decision(roster, None, MAX_TEAM_SIZE, MAX_PKM_MOVES, N_ACTIVE)
+    # Both produce legal teams of the right size.
+    assert len(cmd_pc) == MAX_TEAM_SIZE
+    assert len(cmd_mc) == MAX_TEAM_SIZE
+    # Both pick distinct species in range.
+    pc_ids = [e[0] for e in cmd_pc]
+    assert len(set(pc_ids)) == len(pc_ids)
+    assert all(0 <= i < len(roster) for i in pc_ids)
+
+
+def test_has_speed_control_and_status_helpers_consistent() -> None:
+    """Spot-check helpers on a fabricated roster: at least one species
+    in the fabricated roster has a status-inflicting or speed-control
+    move (gen_move is rng-driven; with a moderate roster size at least
+    one should match). Probabilistic smoke, not a hard claim about any
+    individual species."""
+    _, roster = _make_roster(n_species=20, n_moves=40)
+    any_sc = any(_has_speed_control_move(sp) for sp in roster)
+    any_status = any(_has_status_move(sp) for sp in roster)
+    # With 20 species * up to 4 moves each = 80 move-slots, and each
+    # gen_move has ~30% priority / ~5.9% TR / ~5.9% TW / ~5.9% PARALYZED
+    # status, the probability of zero speed-control across the roster is
+    # vanishingly small. Same for status (1/17 status moves * 80 slots).
+    assert any_sc, "expected at least one speed-control move in a 20-species roster"
+    assert any_status, "expected at least one status-inflicting move in a 20-species roster"

@@ -38,7 +38,7 @@ import numpy as np
 import numpy.typing as npt
 from vgc2.agent import TeamBuildCommand, TeamBuildPolicy
 from vgc2.balance.meta import Meta, Roster
-from vgc2.battle_engine.modifiers import Category, Nature, Stat
+from vgc2.battle_engine.modifiers import Category, Nature, Stat, Status
 from vgc2.battle_engine.move import Move
 from vgc2.battle_engine.pokemon import PokemonSpecies
 
@@ -347,11 +347,300 @@ class MinimaxTeamBuildPolicy(TeamBuildPolicy):  # type: ignore[misc]
         return _build_team_command(roster, picks, max_pkm_moves)
 
 
+def _meta_weights(roster: Roster, meta: Meta | None) -> npt.NDArray[np.float64]:
+    """Per-species opponent weights from observed meta usage.
+
+    Falls back to uniform ``(1/n, ..., 1/n)`` when ``meta`` is ``None``, when
+    ``usage_rate_pokemon`` raises ``ZeroDivisionError`` (epoch 0 of every
+    championship), or when the meta has no signal (sum == 0). Always returns
+    a probability vector summing to 1.
+    """
+    n = len(roster)
+    if n == 0:
+        return np.zeros(0, dtype=np.float64)
+    uniform = np.full(n, 1.0 / n, dtype=np.float64)
+    if meta is None:
+        return uniform
+    try:
+        raw = np.array([meta.usage_rate_pokemon(sp) for sp in roster], dtype=np.float64)
+    except ZeroDivisionError:
+        return uniform
+    total = float(raw.sum())
+    if total <= 0.0:
+        return uniform
+    return raw / total
+
+
+def _weighted_greedy_coverage_picks(
+    table: npt.NDArray[np.float64],
+    weights: npt.NDArray[np.float64],
+    max_team_size: int,
+) -> list[int]:
+    """Pick indices that maximize ``sum_j(weights[j] * max_t(M[t][j]))``.
+
+    Strict generalization of ``_greedy_coverage_picks``: with uniform weights
+    the two functions return identical picks. When ``weights`` reflects
+    meta usage, opponents that actually appear get up-weighted, biasing
+    picks toward meta counters. Classical weighted max-cover greedy
+    approximation (``1 - 1/e`` of optimal).
+    """
+    n = table.shape[0]
+    if n == 0 or max_team_size <= 0:
+        return []
+    # First pick: species with the highest weighted mean row.
+    weighted_means = table @ weights
+    first = int(np.argmax(weighted_means))
+    picks: list[int] = [first]
+    used: set[int] = {first}
+    best_against = table[first].copy()
+    while len(picks) < min(max_team_size, n):
+        best_score = -np.inf
+        best_pick: int | None = None
+        for c in range(n):
+            if c in used:
+                continue
+            new_best = np.maximum(best_against, table[c])
+            score = float((new_best * weights).sum())
+            if score > best_score:
+                best_score = score
+                best_pick = c
+        if best_pick is None:
+            break
+        picks.append(best_pick)
+        used.add(best_pick)
+        best_against = np.maximum(best_against, table[best_pick])
+    return picks
+
+
+class MetaCoverageTeamBuildPolicy(TeamBuildPolicy):  # type: ignore[misc]
+    """Meta-usage-weighted greedy coverage team builder.
+
+    Generalizes ``MatchupTableTeamBuildPolicy``: weight the coverage
+    objective by observed meta usage rates instead of treating opponents
+    as uniformly likely. With uniform weights (``meta is None`` / epoch 0
+    / no usage signal) the FIRST pick is identical to
+    ``MatchupTableTeamBuildPolicy`` (both ``argmax`` the row mean), but
+    later picks may differ: ``MatchupTableTeamBuildPolicy`` masks
+    already-picked species from the coverage average, while this policy
+    leaves the full opponent distribution in the score. The unmasked
+    form lines up cleanly with the meta-weighted generalisation
+    (``sum_j(w[j] * max_t(M[t][j]))``), where masking would be
+    inconsistent with treating the meta as the opponent distribution.
+    When the meta has signal, picks shift toward species that beat
+    high-usage opponents.
+
+    Strategic insight vs ``MinimaxTeamBuildPolicy``: minimax solves the
+    Nash equilibrium against an adversarial opponent who picks worst-case
+    for us. In a real competitive field, opponents don't pick adversarially
+    — they cluster around the empirical meta. Optimizing against the meta
+    distribution dominates worst-case Nash when the field isn't actually
+    adversarial.
+    """
+
+    def __init__(self, n_battles_per_pair: int = _MATCHUP_TABLE_N_PER_PAIR) -> None:
+        self._n_battles_per_pair = n_battles_per_pair
+
+    def decision(
+        self,
+        roster: Roster,
+        meta: Meta | None,
+        max_team_size: int,
+        max_pkm_moves: int,
+        n_active: int,
+    ) -> TeamBuildCommand:
+        if not roster or max_team_size <= 0:
+            return []
+        table = get_or_build_matchup_table(
+            roster,
+            n_battles_per_pair=self._n_battles_per_pair,
+            max_pkm_moves=max_pkm_moves,
+        )
+        weights = _meta_weights(roster, meta)
+        picks = _weighted_greedy_coverage_picks(table, weights, max_team_size)
+        return _build_team_command(roster, picks, max_pkm_moves)
+
+
+def _has_speed_control_move(species: PokemonSpecies) -> bool:
+    """Does this species carry any move that gives the team speed control?
+
+    Per principle #1: priority > 0, Trick Room toggle, Tailwind toggle, or a
+    paralysis-inflicting move all count. Without any of these the team has
+    no answer to a faster opponent setup.
+    """
+    for m in species.moves:
+        if m.priority > 0:
+            return True
+        if m.toggle_trickroom:
+            return True
+        if m.toggle_tailwind:
+            return True
+        if int(m.status) == int(Status.PARALYZED):
+            return True
+    return False
+
+
+def _has_status_move(species: PokemonSpecies) -> bool:
+    """Per principle #12: any move inflicting a non-NONE status."""
+    return any(int(m.status) != int(Status.NONE) for m in species.moves)
+
+
+def _principle_bonus(roster: Roster, picks: list[int]) -> float:
+    """Encoded subset of the 15-principle doubles checklist.
+
+    Additive bonus / penalty applied per candidate team during greedy pick.
+    Bonus magnitudes are tuned so principle compliance biases close calls
+    (matchup-score deltas <~0.1) without overriding genuinely better
+    coverage. Principles encoded:
+
+    - #1 speed-control redundancy: 2+ sources reward; 0 sources gets no
+      bonus (implicit penalty vs compliant alternatives).
+    - #7 phys/spec split: both attacker types on the team.
+    - #10 bulk floor: penalty when 2+ picks have combined def+spd < 150
+      (glass cannons).
+    - #12 status coverage: at least one status-inflicting move on the team.
+    - #15 diversify STAB types: bonus per distinct primary type, capped at 3.
+
+    Principles #4/#5/#8/#9/#11 are not encoded because the underlying
+    mechanism doesn't exist in vgc2 (no Fake Out, no redirection, no
+    abilities, no spread-target flag). Principles #2/#3/#13/#14 are
+    deferred to v2 (cheap algorithmic wins are scoped first).
+    """
+    if not picks:
+        return 0.0
+    species = [roster[p] for p in picks]
+    bonus = 0.0
+
+    # #1 speed-control redundancy
+    sc_count = sum(1 for s in species if _has_speed_control_move(s))
+    if sc_count >= 2:
+        bonus += 0.10
+    elif sc_count == 1:
+        bonus += 0.03
+    # 0 -> no bonus (implicit penalty)
+
+    # #12 status coverage
+    if any(_has_status_move(s) for s in species):
+        bonus += 0.05
+
+    # #15 diversify STAB types
+    distinct_types: set[int] = set()
+    for s in species:
+        distinct_types.update(int(t) for t in s.types)
+    bonus += 0.02 * min(3, len(distinct_types))
+
+    # #7 phys/spec split
+    has_phys = any(s.base_stats[Stat.ATTACK] > s.base_stats[Stat.SPECIAL_ATTACK] for s in species)
+    has_spec = any(s.base_stats[Stat.SPECIAL_ATTACK] > s.base_stats[Stat.ATTACK] for s in species)
+    if has_phys and has_spec:
+        bonus += 0.05
+
+    # #10 bulk floor: glass cannon penalty
+    glass = sum(
+        1 for s in species if s.base_stats[Stat.DEFENSE] + s.base_stats[Stat.SPECIAL_DEFENSE] < 150
+    )
+    if glass >= 2:
+        bonus -= 0.10
+
+    return bonus
+
+
+def _principled_greedy_picks(
+    table: npt.NDArray[np.float64],
+    weights: npt.NDArray[np.float64],
+    roster: Roster,
+    max_team_size: int,
+) -> list[int]:
+    """Meta-weighted greedy coverage with principle bonus added per candidate.
+
+    Same shape as ``_weighted_greedy_coverage_picks`` but each candidate's
+    score adds ``_principle_bonus(roster, picks_so_far + [candidate])``.
+    Bonuses are small enough (max ~+0.26, min ~-0.10) that they bias ties
+    rather than override strong matchup advantages.
+    """
+    n = table.shape[0]
+    if n == 0 or max_team_size <= 0:
+        return []
+    weighted_means = table @ weights
+    best_first = 0
+    best_first_score = -float("inf")
+    for c in range(n):
+        score = float(weighted_means[c]) + _principle_bonus(roster, [c])
+        if score > best_first_score:
+            best_first_score = score
+            best_first = c
+    picks: list[int] = [best_first]
+    used: set[int] = {best_first}
+    best_against = table[best_first].copy()
+    while len(picks) < min(max_team_size, n):
+        best_score = -float("inf")
+        best_pick: int | None = None
+        for c in range(n):
+            if c in used:
+                continue
+            new_best = np.maximum(best_against, table[c])
+            coverage = float((new_best * weights).sum())
+            principle = _principle_bonus(roster, [*picks, c])
+            total = coverage + principle
+            if total > best_score:
+                best_score = total
+                best_pick = c
+        if best_pick is None:
+            break
+        picks.append(best_pick)
+        used.add(best_pick)
+        best_against = np.maximum(best_against, table[best_pick])
+    return picks
+
+
+class PrincipledCoverageTeamBuildPolicy(TeamBuildPolicy):  # type: ignore[misc]
+    """Meta-coverage + encoded subset of the 15-principle doubles checklist.
+
+    Same matchup-table cache + meta-weight machinery as
+    ``MetaCoverageTeamBuildPolicy``, but each greedy pick also gets a
+    principle bonus (see ``_principle_bonus``). The bonus rewards speed-
+    control redundancy, status coverage, phys/spec split, type diversity,
+    and penalizes glass-cannon stacking — all from data visible on
+    ``Move`` / ``PokemonSpecies`` (no abilities required, no spread-target
+    flag, no Fake Out flag — vgc2 doesn't have those concepts).
+
+    Why a sibling class instead of folding the bonus into
+    ``MetaCoverageTeamBuildPolicy``: the bonus weights are tuned and could
+    be wrong. Keeping them in a separate class lets the bench loop A/B
+    both compounds against the current default. If PrincipledCoverage
+    beats both Minimax and MetaCoverage at statistical significance, we
+    promote it; if it underperforms, MetaCoverage stays clean.
+    """
+
+    def __init__(self, n_battles_per_pair: int = _MATCHUP_TABLE_N_PER_PAIR) -> None:
+        self._n_battles_per_pair = n_battles_per_pair
+
+    def decision(
+        self,
+        roster: Roster,
+        meta: Meta | None,
+        max_team_size: int,
+        max_pkm_moves: int,
+        n_active: int,
+    ) -> TeamBuildCommand:
+        if not roster or max_team_size <= 0:
+            return []
+        table = get_or_build_matchup_table(
+            roster,
+            n_battles_per_pair=self._n_battles_per_pair,
+            max_pkm_moves=max_pkm_moves,
+        )
+        weights = _meta_weights(roster, meta)
+        picks = _principled_greedy_picks(table, weights, roster, max_team_size)
+        return _build_team_command(roster, picks, max_pkm_moves)
+
+
 VgcAiTeamBuildPolicy = MinimaxTeamBuildPolicy
 
 __all__ = [
     "MatchupTableTeamBuildPolicy",
+    "MetaCoverageTeamBuildPolicy",
     "MetaUsageTeamBuildPolicy",
     "MinimaxTeamBuildPolicy",
+    "PrincipledCoverageTeamBuildPolicy",
     "VgcAiTeamBuildPolicy",
 ]
