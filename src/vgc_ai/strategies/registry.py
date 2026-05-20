@@ -31,7 +31,10 @@ from vgc2.agent.teambuild import RandomTeamBuildPolicy
 from vgc_ai.policies.heuristic_det import HeuristicDetBattlePolicy
 from vgc_ai.policies.meta_balance import NoOpMetaBalancePolicy
 from vgc_ai.policies.rule_balance import DefaultRuleBalancePolicy
-from vgc_ai.policies.selection import MatchupAwareSelectionPolicy
+from vgc_ai.policies.selection import (
+    MatchupAwareSelectionPolicy,
+    MetaWeightedSelectionPolicy,
+)
 from vgc_ai.policies.tabular_mc import TabularMCBattlePolicy
 from vgc_ai.policies.teambuild import (
     MatchupTableTeamBuildPolicy,
@@ -105,6 +108,18 @@ CHAMPIONSHIP_STRATEGIES: dict[str, ChampionshipStrategy] = {
             name="random+random",
             team_build_policy=RandomTeamBuildPolicy,
             selection_policy=RandomSelectionPolicy,
+        ),
+        # Same minimax team builder as the current default; the differentiator
+        # is the selection layer, which now consumes meta.usage_rate_pokemon
+        # via the Championship Track set_meta hook (proposed task
+        # policy-selection-set-meta-prior-usage-weighting). Strict
+        # generalisation of MatchupAwareSelectionPolicy — falls back to the
+        # type-chart parent when the meta is empty (epoch 0, or no usable
+        # usage data), so the worst case is parity with the default.
+        ChampionshipStrategy(
+            name="minimax+meta_weighted_selection",
+            team_build_policy=MinimaxTeamBuildPolicy,
+            selection_policy=MetaWeightedSelectionPolicy,
         ),
     )
 }

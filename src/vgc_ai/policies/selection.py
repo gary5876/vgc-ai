@@ -27,6 +27,14 @@ We don't model the opponent's selection — they choose simultaneously, so
 their leads are unknown. Averaging over their full team is the
 conservative substitute.
 
+``MetaWeightedSelectionPolicy`` extends the same primitive: when the
+championship meta has populated usage data, the uniform mean over the
+opponent's team is replaced by a ``usage_rate_pokemon``-weighted mean
+so high-usage opp species drive the score more than rare ones. Falls
+back to ``MatchupAwareSelectionPolicy``'s uniform behavior whenever the
+meta is absent / empty / yields ``ZeroDivisionError`` (same epoch-0
+defense as ``teambuild._species_priority``).
+
 Negative results recorded (so future tuners don't repeat them):
 
 - Singleton (``n_active=1``) matchup table for scoring: -90 ELO mean over
@@ -115,6 +123,91 @@ class MatchupAwareSelectionPolicy(SelectionPolicy):  # type: ignore[misc]
         return ordered[:max_size]
 
 
+def _opp_usage_weights(meta: Meta | None, opp_team: Team) -> list[float] | None:
+    """Return per-opp-member usage weights normalised to sum to 1.
+
+    Returns ``None`` when the meta is absent, the opponent team is empty,
+    ``BasicMeta.usage_rate_pokemon`` raises ``ZeroDivisionError`` (epoch 0
+    of every championship — same pattern guarded by
+    ``teambuild._species_priority``), or all weights are zero (meta has
+    matches recorded but none touched any of these species yet). In every
+    fallback case the caller should drop back to uniform scoring.
+    """
+    if meta is None or not opp_team.members:
+        return None
+    try:
+        raw = [meta.usage_rate_pokemon(opp.species) for opp in opp_team.members]
+    except ZeroDivisionError:
+        return None
+    total = sum(raw)
+    if total <= 0.0:
+        return None
+    return [w / total for w in raw]
+
+
+def _meta_weighted_selection_score(
+    my_pkm: Pokemon,
+    opp_team: Team,
+    weights: list[float],
+    params: BattleRuleParam,
+) -> float:
+    """Usage-weighted variant of ``_selection_score``.
+
+    ``weights`` must already sum to 1; computed once per ``decision`` call
+    by ``_opp_usage_weights``. Same (offense - defense) signal as the
+    type-chart baseline, just with non-uniform per-opp contributions —
+    high-usage species drive the score more than rare ones.
+    """
+    if not opp_team.members:
+        return 0.0
+    score = 0.0
+    for opp, w in zip(opp_team.members, weights, strict=True):
+        offense = _best_offense_multiplier(my_pkm, opp, params)
+        defense = _best_offense_multiplier(opp, my_pkm, params)
+        score += w * (offense - defense)
+    return score
+
+
+class MetaWeightedSelectionPolicy(MatchupAwareSelectionPolicy):
+    """Weight opponent members by ``meta.usage_rate_pokemon`` in the score.
+
+    Same (offense - defense) primitive as ``MatchupAwareSelectionPolicy``,
+    but the uniform mean over the opponent's team is replaced with a
+    usage-weighted mean once the championship meta is populated. Rationale:
+    the framework hands us the meta via ``set_meta`` so we can prioritise
+    leads that counter the opponents most likely to be played; a uniform
+    mean discards that signal and treats a 50%-usage staple identically
+    to a 5%-usage curiosity sharing the same team slot.
+
+    Strict generalisation of the parent: when the meta is absent OR has
+    no usable data yet (epoch 0, or ``ZeroDivisionError`` from
+    ``BasicMeta.usage_rate_pokemon``, or all-zero weights) we delegate
+    back to ``MatchupAwareSelectionPolicy.decision`` — so the worst case
+    is parity, not regression.
+    """
+
+    def decision(self, teams: tuple[Team, Team], max_size: int) -> SelectionCommand:
+        my_team, opp_team = teams
+        weights = _opp_usage_weights(self._meta, opp_team)
+        if weights is None:
+            return super().decision(teams, max_size)
+        params: BattleRuleParam = self.params
+        scored = [
+            (
+                -_meta_weighted_selection_score(p, opp_team, weights, params),
+                i,
+            )
+            for i, p in enumerate(my_team.members)
+        ]
+        scored.sort()
+        ordered = [i for _, i in scored]
+        return ordered[:max_size]
+
+
 VgcAiSelectionPolicy = MatchupAwareSelectionPolicy
 
-__all__ = ["MatchupAwareSelectionPolicy", "VgcAiSelectionPolicy"]
+__all__ = [
+    "MatchupAwareSelectionPolicy",
+    "MetaWeightedSelectionPolicy",
+    "VgcAiSelectionPolicy",
+]
