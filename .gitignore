@@ -55,8 +55,9 @@ bench/vm-snapshot/
 bench/strategies/
 models/
 
-# Reviewer loop runtime artifacts
+# Reviewer + proposer loop runtime artifacts
 ops/claude_budget.csv
+ops/proposer_attempts.csv
 
 # Editors / IDEs
 .vscode/
