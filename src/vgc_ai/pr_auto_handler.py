@@ -83,29 +83,30 @@ def _default_cmd_runner(cmd: list[str], cwd: Path, timeout: int) -> tuple[int, s
     return result.returncode, result.stdout, result.stderr
 
 
-def parse_bench_gate(body: str) -> dict[str, str] | None:
-    r"""Extract the ``BENCH GATE`` key-value block from a PR body.
+def _parse_marker_block(body: str, marker: str) -> dict[str, str] | None:
+    r"""Find ``marker`` as the sole content of a line (modulo whitespace), then
+    parse subsequent ``k=v`` lines until a blank or non-``k=v`` line.
 
-    Block shape (the reviewer's prompt template demands this exact form):
+    Strict on the marker line: the marker must be the entire stripped
+    content. Mentioning the marker text inside markdown formatting
+    (``\`BENCH GATE\```, table cells, prose) will NOT trigger detection.
+    This prevents the false-positive where a PR's prose mentions the
+    marker and the handler treats it as a loop PR.
 
-        BENCH GATE
-        track=battle
-        candidate=foo
-        default=bar
-        pooled_n=100
-        pooled_wins=70
-        ci95_low=0.60
-        ci95_high=0.78
-
-    Tolerant of an enclosing markdown code fence: lines starting with
-    ``\`\`\``` are skipped. Stops at the first blank or non-``k=v`` line
-    after parsing began.
+    Tolerant inside the block: a leading markdown code fence
+    (``\`\`\``) is skipped if it immediately follows the marker; blank
+    lines inside the block end parsing as before.
     """
-    if BENCH_GATE_MARKER not in body:
+    lines = body.splitlines()
+    start: int | None = None
+    for i, raw in enumerate(lines):
+        if raw.strip() == marker:
+            start = i + 1
+            break
+    if start is None:
         return None
-    tail = body.split(BENCH_GATE_MARKER, 1)[1]
     parsed: dict[str, str] = {}
-    for raw in tail.splitlines():
+    for raw in lines[start:]:
         line = raw.strip()
         if not line:
             if parsed:
@@ -125,45 +126,26 @@ def parse_bench_gate(body: str) -> dict[str, str] | None:
         if k and v:
             parsed[k] = v
     return parsed or None
+
+
+def parse_bench_gate(body: str) -> dict[str, str] | None:
+    """Extract the ``BENCH GATE`` key-value block from a PR body.
+
+    Detection is strict: ``BENCH GATE`` must appear as the sole content
+    of a line (after stripping). Mentions inside markdown formatting do
+    not match. See ``_parse_marker_block`` for the full block grammar.
+    """
+    return _parse_marker_block(body, BENCH_GATE_MARKER)
 
 
 def parse_new_compound(body: str) -> dict[str, str] | None:
     """Extract the ``NEW COMPOUND`` key-value block from a PR body.
 
-    Block shape (the proposer's prompt template demands this exact form):
-
-        NEW COMPOUND
-        track=battle
-        compound_name=heuristic_det_damage_term
-        rationale=Adds a base_power-weighted damage term to evaluate()
-
-    Tolerance rules match ``parse_bench_gate``: optional markdown fence,
-    stops at first blank or non-``k=v`` line after parsing began.
+    Detection is strict (see ``parse_bench_gate``): ``NEW COMPOUND`` must
+    appear as the sole content of a line. Mentions inside markdown
+    formatting do not match.
     """
-    if NEW_COMPOUND_MARKER not in body:
-        return None
-    tail = body.split(NEW_COMPOUND_MARKER, 1)[1]
-    parsed: dict[str, str] = {}
-    for raw in tail.splitlines():
-        line = raw.strip()
-        if not line:
-            if parsed:
-                break
-            continue
-        if line.startswith("```"):
-            if parsed:
-                break
-            continue
-        if "=" not in line:
-            if parsed:
-                break
-            continue
-        k, _, v = line.partition("=")
-        k = k.strip()
-        v = v.strip()
-        if k and v:
-            parsed[k] = v
-    return parsed or None
+    return _parse_marker_block(body, NEW_COMPOUND_MARKER)
 
 
 def scope_check(
@@ -237,7 +219,19 @@ def parse_pr_age_seconds(created_at: str) -> float:
 
 
 def _has_handler_marker(body: str) -> bool:
-    return BENCH_GATE_MARKER in body or NEW_COMPOUND_MARKER in body
+    """Return True iff a marker appears as the sole content of some line.
+
+    Strict by design — prose mentions of ``BENCH GATE`` or ``NEW COMPOUND``
+    in markdown formatting must not trigger handler attention. The PR
+    that initially added this strict check was itself closed by the old
+    looser handler because its description mentioned the markers in
+    backticks and table cells; this stricter check prevents recurrence.
+    """
+    for raw in body.splitlines():
+        stripped = raw.strip()
+        if stripped in (BENCH_GATE_MARKER, NEW_COMPOUND_MARKER):
+            return True
+    return False
 
 
 def list_matching_prs(gh_runner: GhRunner | None = None) -> list[dict[str, Any]]:

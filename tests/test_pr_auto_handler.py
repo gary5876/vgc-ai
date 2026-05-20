@@ -567,3 +567,72 @@ def test_evaluate_pr_closes_when_body_has_neither_marker(tmp_path: Path) -> None
     action, reason = handler.evaluate_pr(pr, tmp_path, tmp_path)
     assert action == "close"
     assert "missing BENCH GATE or NEW COMPOUND" in reason
+
+
+# ---- marker false-positive guard (regression: PR #30 was wrongly closed
+#      by the looser handler because its description mentioned the marker
+#      inside markdown code spans and table cells) -------------------------
+
+
+def test_parse_bench_gate_ignores_marker_in_backticks() -> None:
+    """A prose PR description that says `BENCH GATE` in backticks must
+    NOT be treated as a BENCH GATE PR. The marker only matches as the
+    sole content of a line."""
+    body = "The handler accepts `BENCH GATE` and `NEW COMPOUND` PRs.\n\nSummary..."
+    assert handler.parse_bench_gate(body) is None
+
+
+def test_parse_bench_gate_ignores_marker_in_table_cell() -> None:
+    body = "| Class | Marker |\n|---|---|\n| Swap | `BENCH GATE` |\n"
+    assert handler.parse_bench_gate(body) is None
+
+
+def test_parse_new_compound_ignores_marker_in_backticks() -> None:
+    body = "PR body with `NEW COMPOUND` referenced inline."
+    assert handler.parse_new_compound(body) is None
+
+
+def test_has_handler_marker_strict_against_prose() -> None:
+    body = (
+        "## Two PR classes\n\n"
+        "The handler accepts `BENCH GATE` (default-swap) and `NEW COMPOUND` (proposer) PRs.\n"
+        "Neither marker is on its own line; this PR is infrastructure-only.\n"
+    )
+    assert handler._has_handler_marker(body) is False
+
+
+def test_has_handler_marker_matches_marker_on_own_line() -> None:
+    body = "## Summary\n\nBENCH GATE\ntrack=battle\ncandidate=x\n"
+    assert handler._has_handler_marker(body) is True
+
+
+def test_has_handler_marker_matches_marker_with_leading_whitespace() -> None:
+    body = "Header\n\n   BENCH GATE\ntrack=battle\n"
+    assert handler._has_handler_marker(body) is True
+
+
+def test_list_matching_prs_skips_prose_mentions() -> None:
+    """The PR-#30 regression: a PR description that *mentions* the marker
+    in backticks/tables/etc must not be matched."""
+    response = json.dumps(
+        [
+            {
+                "number": 30,
+                "body": "## Summary\n\nThis PR widens scope. It teaches the handler to recognize `BENCH GATE` and `NEW COMPOUND` PR classes.\n",
+                "files": [],
+                "createdAt": "x",
+            },
+            {
+                "number": 31,
+                "body": "## Summary\n\nReal proposer PR.\n\nBENCH GATE\ntrack=battle\ncandidate=foo\n",
+                "files": [],
+                "createdAt": "x",
+            },
+        ]
+    )
+
+    def fake_gh(cmd: list[str]) -> str:
+        return response
+
+    prs = handler.list_matching_prs(gh_runner=fake_gh)
+    assert [p["number"] for p in prs] == [31]
