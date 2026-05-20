@@ -38,6 +38,7 @@ from typing import Any
 from vgc_ai.reviewer import (
     BENCH_GATE_MARKER,
     DEFAULT_CSV_DIR,
+    NEW_COMPOUND_MARKER,
     evaluate_gate,
 )
 
@@ -61,8 +62,6 @@ NEW_COMPOUND_ALLOWED_PREFIXES: tuple[str, ...] = (
     "src/vgc_ai/strategies/",
     "tests/",
 )
-
-NEW_COMPOUND_MARKER = "NEW COMPOUND"
 
 # Backwards-compatible alias used by older callers and tests.
 DEFAULT_ALLOWED_PATHS = BENCH_GATE_ALLOWED_PATHS

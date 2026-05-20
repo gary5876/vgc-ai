@@ -79,6 +79,47 @@ def test_list_open_reviewer_prs_returns_sentinel_on_bad_json() -> None:
     assert reviewer.list_open_reviewer_prs(gh_runner=fake_gh) == [0]
 
 
+def test_list_open_reviewer_prs_includes_new_compound_marker() -> None:
+    """Both loop PR classes must pause the proposer — failing to detect
+    NEW COMPOUND PRs was the root cause of today's PR-33/35 conflict
+    chaos (proposer fired hourly while its own prior PRs were still in
+    flight; multiple PRs touched registry.py concurrently)."""
+    fake_response = json.dumps(
+        [
+            {"number": 100, "body": "no marker"},
+            {"number": 101, "body": "BENCH GATE\ntrack=battle"},
+            {"number": 102, "body": "## Summary\n\nNEW COMPOUND\ntrack=championship"},
+        ]
+    )
+
+    def fake_gh(cmd: list[str]) -> str:
+        return fake_response
+
+    assert sorted(reviewer.list_open_reviewer_prs(gh_runner=fake_gh)) == [101, 102]
+
+
+def test_list_open_reviewer_prs_strict_against_prose_mentions() -> None:
+    """A PR description that *mentions* the marker in prose must not
+    pause the loop (matches the auto-handler's strict marker detection
+    from PR #32)."""
+    fake_response = json.dumps(
+        [
+            {
+                "number": 200,
+                "body": (
+                    "## Summary\n\nThis PR widens the handler to accept "
+                    "`BENCH GATE` and `NEW COMPOUND` markers.\n"
+                ),
+            }
+        ]
+    )
+
+    def fake_gh(cmd: list[str]) -> str:
+        return fake_response
+
+    assert reviewer.list_open_reviewer_prs(gh_runner=fake_gh) == []
+
+
 def test_daily_claude_calls_counts_today_only(tmp_path: Path) -> None:
     budget = tmp_path / "claude_budget.csv"
     with budget.open("w", newline="", encoding="utf-8") as f:
