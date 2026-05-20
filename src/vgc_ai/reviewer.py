@@ -48,6 +48,8 @@ DEFAULT_BUDGET_PATH = Path("ops/claude_budget.csv")
 DEFAULT_DAILY_CAP = 50  # bumped 2026-05-20 — user's Max plan tolerates frequent calls
 DEFAULT_RECENT_ROWS = 50
 BENCH_GATE_MARKER = "BENCH GATE"
+NEW_COMPOUND_MARKER = "NEW COMPOUND"
+_LOOP_MARKERS = (BENCH_GATE_MARKER, NEW_COMPOUND_MARKER)
 CLAUDE_TIMEOUT_SEC = 900
 GH_TIMEOUT_SEC = 30
 
@@ -74,12 +76,27 @@ def _default_gh_runner(cmd: list[str]) -> str:
     return result.stdout
 
 
-def list_open_reviewer_prs(gh_runner: GhRunner | None = None) -> list[int]:
-    """Return PR numbers of open PRs whose body contains ``BENCH_GATE_MARKER``.
+def _body_has_loop_marker(body: str) -> bool:
+    """True iff a loop marker appears as the sole content of some line.
 
-    Defaults to invoking ``gh pr list --state open --json number,body``. If
-    ``gh`` is unavailable or returns malformed JSON, returns ``[0]`` so the
-    reviewer pauses conservatively rather than firing into an unknown
+    Strict by design (matching the auto-handler's parser): markers in
+    prose, backticks, or table cells must NOT match — only standalone
+    lines. Both BENCH_GATE (reviewer-opened default-swap PRs) and
+    NEW_COMPOUND (proposer-opened new-strategy PRs) count as "loop PRs"
+    that should pause sibling loops to avoid stacking conflicts.
+    """
+    return any(raw.strip() in _LOOP_MARKERS for raw in body.splitlines())
+
+
+def list_open_reviewer_prs(gh_runner: GhRunner | None = None) -> list[int]:
+    """Return PR numbers of open loop PRs (BENCH GATE or NEW COMPOUND).
+
+    Used by both reviewer and proposer to pause-while-PR-open and avoid
+    stacking multiple concurrent loop PRs (which inevitably conflict on
+    ``src/vgc_ai/strategies/registry.py``).
+
+    If ``gh`` is unavailable or returns malformed JSON, returns ``[0]``
+    so callers pause conservatively rather than firing into an unknown
     repository state.
     """
     runner = gh_runner or _default_gh_runner
@@ -91,7 +108,7 @@ def list_open_reviewer_prs(gh_runner: GhRunner | None = None) -> list[int]:
         data = json.loads(raw)
     except json.JSONDecodeError:
         return [0]
-    return [int(item["number"]) for item in data if BENCH_GATE_MARKER in (item.get("body") or "")]
+    return [int(item["number"]) for item in data if _body_has_loop_marker(item.get("body") or "")]
 
 
 def daily_claude_calls(budget_path: Path, today: str | None = None) -> int:
