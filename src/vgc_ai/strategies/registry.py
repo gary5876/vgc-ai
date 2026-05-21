@@ -38,6 +38,7 @@ from vgc_ai.policies.selection import (
     MetaWeightedSelectionPolicy,
     PairCoverageSelectionPolicy,
     SpeedTierAwareSelectionPolicy,
+    StabAwareSelectionPolicy,
 )
 from vgc_ai.policies.tabular_mc import TabularMCBattlePolicy
 from vgc_ai.policies.teambuild import (
@@ -224,6 +225,24 @@ CHAMPIONSHIP_STRATEGIES: dict[str, ChampionshipStrategy] = {
             name="minimax+speed_tier_selection",
             team_build_policy=MinimaxTeamBuildPolicy,
             selection_policy=SpeedTierAwareSelectionPolicy,
+        ),
+        # Same LP-minimax team builder as the current default; the
+        # differentiator is the selection layer, which folds the STAB
+        # multiplier (params.STAB_MODIFIER = 1.5x) into the per-move
+        # offense and defense before the best-of-moves max. Every other
+        # selection policy here uses the raw type-effectiveness
+        # multiplier alone, so a STAB 2x super-effective hit (3.0x real
+        # damage in the damage calculator) ranks identically to a
+        # non-STAB 2x hit (2.0x). Single-axis change vs MatchupAware --
+        # same primitive, same per-opp aggregation, just adds the STAB
+        # bonus that vgc2's damage_calculator.stab_modifier already
+        # applies at battle time. When neither side has STAB on any
+        # damaging move, scores collapse to the parent -- strict
+        # refinement, never a regression.
+        ChampionshipStrategy(
+            name="minimax+stab_aware_selection",
+            team_build_policy=MinimaxTeamBuildPolicy,
+            selection_policy=StabAwareSelectionPolicy,
         ),
     )
 }

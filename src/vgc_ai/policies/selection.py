@@ -67,6 +67,18 @@ same ``_best_offense_multiplier`` primitive, plus a per-opp +/-
 ``_INITIATIVE_BONUS`` based on ``Pokemon.stats[Stat.SPEED]`` (the
 post-EV/IV/nature value), so the JOLLY/TIMID + 252 SPE team-build
 spread choices flow through into selection.
+
+``StabAwareSelectionPolicy`` captures the largest damage multiplier
+ignored by every other selection policy here: STAB (same-type attack
+bonus). vgc2's damage calculator multiplies the move's effective
+damage by ``params.STAB_MODIFIER`` (1.5x) whenever the move's type is
+in the attacker's types -- see ``damage_calculator.stab_modifier``.
+The type-chart primitive used by every other selection policy treats
+a STAB 2x super-effective hit (3.0x real damage) the same as a
+non-STAB 2x hit (2.0x real damage), throwing away 50% damage
+information. Single-axis change vs ``MatchupAwareSelectionPolicy`` --
+same per-opp aggregation, same best-of-moves max, just folds the STAB
+multiplier into the move's effective potency before taking the max.
 """
 
 from __future__ import annotations
@@ -586,6 +598,107 @@ class SpeedTierAwareSelectionPolicy(MatchupAwareSelectionPolicy):
         return ordered[:max_size]
 
 
+def _best_stab_offense_multiplier(
+    attacker: Pokemon, defender: Pokemon, params: BattleRuleParam
+) -> float:
+    """Best type-effectiveness multiplier folded with STAB from attacker's damaging moves.
+
+    Same per-move scan as ``_best_offense_multiplier`` (skips ``base_power == 0``,
+    1.0 neutral baseline), but each move's effective potency is multiplied by
+    ``params.STAB_MODIFIER`` when ``move.pkm_type`` appears in the attacker's
+    species types -- mirroring ``damage_calculator.stab_modifier``. So a Fire-
+    type's Fire move vs a Grass-type defender scores 2.0 * 1.5 = 3.0, where the
+    parent would score 2.0.
+    """
+    best = 1.0
+    attacker_types = attacker.species.types
+    stab = params.STAB_MODIFIER
+    for move in attacker.moves:
+        if move.base_power == 0:
+            continue
+        m = type_effectiveness_modifier(params, move.pkm_type, defender.species.types)
+        if move.pkm_type in attacker_types:
+            m *= stab
+        if m > best:
+            best = m
+    return best
+
+
+def _stab_aware_selection_score(my_pkm: Pokemon, opp_team: Team, params: BattleRuleParam) -> float:
+    """Net (STAB-aware offense - STAB-aware defense) averaged over opp_team.
+
+    Same shape as ``_selection_score`` -- mean of best-offense across both
+    directions -- but uses ``_best_stab_offense_multiplier`` on both legs so
+    STAB exposure (ours and the opp's) flows through. When neither side has
+    STAB on any damaging move, the score collapses to ``_selection_score``.
+    """
+    if not opp_team.members:
+        return 0.0
+    offense = 0.0
+    defense = 0.0
+    for opp in opp_team.members:
+        offense += _best_stab_offense_multiplier(my_pkm, opp, params)
+        defense += _best_stab_offense_multiplier(opp, my_pkm, params)
+    n = len(opp_team.members)
+    return (offense - defense) / n
+
+
+class StabAwareSelectionPolicy(MatchupAwareSelectionPolicy):
+    """Order team members by net STAB-aware type matchup vs the opponent's team.
+
+    Every other selection policy in the module uses ``_best_offense_multiplier``,
+    which captures only the raw type-effectiveness multiplier from the type
+    chart. vgc2's damage calculator also applies a ``params.STAB_MODIFIER``
+    (1.5x) when the move's type matches one of the attacker's species types --
+    see ``damage_calculator.stab_modifier``. The static type-chart primitive
+    discards that signal, so a STAB 2x super-effective hit (3.0x real damage)
+    ranks identically to a non-STAB 2x hit (2.0x real damage).
+
+    Single-axis change vs ``MatchupAwareSelectionPolicy``:
+
+    - Same per-opp aggregation (uniform mean over the opp team).
+    - Same best-of-moves max across damaging moves; status moves
+      (``base_power == 0``) are still skipped.
+    - Each move's effective potency is multiplied by ``params.STAB_MODIFIER``
+      when ``move.pkm_type`` is in the attacker's species types, before the
+      max-over-moves selection. Applies symmetrically to defense: an opp's
+      STAB threat hurts us proportionally more.
+
+    Theoretical leverage over the default:
+
+    - A STAB-coverage lead deals 50% more damage than a non-STAB lead with
+      the same type-chart matchup. Ranking the two identically (as every
+      other policy here does) systematically underrates same-type movesets,
+      which the team builder explicitly assembles for the STAB bonus.
+    - The defense leg correctly penalises leads exposed to an opp's STAB
+      attack: a Grass-type lead vs a Fire-type opp eats 1.5 * 2.0 = 3.0x
+      effective damage from a Fire move, not the 2.0x the parent computes.
+      That's a real worst-case threat the static type-chart smooths over.
+    - When neither side has STAB on any damaging move, the score is
+      identical to the parent's -- so the policy is a strict refinement,
+      never a regression on STAB-free roster slices.
+
+    Ignores ``meta`` on purpose -- this is the single-axis change vs the
+    type-chart parent, isolating the *damage-multiplier* improvement from
+    any usage-prior, max-threat, pair-coverage, or speed-tier composition.
+    Future compounds can stack STAB awareness on top of those.
+    """
+
+    def decision(self, teams: tuple[Team, Team], max_size: int) -> SelectionCommand:
+        my_team, opp_team = teams
+        params: BattleRuleParam = self.params
+        scored = [
+            (
+                -_stab_aware_selection_score(p, opp_team, params),
+                i,
+            )
+            for i, p in enumerate(my_team.members)
+        ]
+        scored.sort()
+        ordered = [i for _, i in scored]
+        return ordered[:max_size]
+
+
 VgcAiSelectionPolicy = MatchupAwareSelectionPolicy
 
 __all__ = [
@@ -594,5 +707,6 @@ __all__ = [
     "MetaWeightedSelectionPolicy",
     "PairCoverageSelectionPolicy",
     "SpeedTierAwareSelectionPolicy",
+    "StabAwareSelectionPolicy",
     "VgcAiSelectionPolicy",
 ]
