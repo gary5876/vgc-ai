@@ -36,6 +36,7 @@ from vgc_ai.policies.selection import (
     MatchupAwareSelectionPolicy,
     MetaThreatAwareSelectionPolicy,
     MetaWeightedSelectionPolicy,
+    PairCoverageSelectionPolicy,
 )
 from vgc_ai.policies.tabular_mc import TabularMCBattlePolicy
 from vgc_ai.policies.teambuild import (
@@ -179,6 +180,30 @@ CHAMPIONSHIP_STRATEGIES: dict[str, ChampionshipStrategy] = {
             name="principled_coverage+matchup_aware",
             team_build_policy=PrincipledCoverageTeamBuildPolicy,
             selection_policy=MatchupAwareSelectionPolicy,
+        ),
+        # Same LP-minimax team builder as the current default; the
+        # differentiator is the selection layer, which scores *pairs*
+        # of leads jointly instead of independent members. For each
+        # candidate pair (a, b) and each opp k, pair offense is
+        # ``max(off(a, k), off(b, k))`` (the better-positioned lead
+        # targets k) and pair defense is ``max(off(k, a), off(k, b))``
+        # (opp focus-fires whichever of our pair is more vulnerable).
+        # The argmax across all C(n, 2) candidate pairs is the lead
+        # pair; remaining team slots fill by singleton score. This is
+        # the single-axis change vs the type-chart parent -- same
+        # primitive, non-decomposable pair-level aggregation. Two
+        # leads scored identically as singletons can compose into very
+        # different pairs depending on which opp threats they cover
+        # jointly: a 2x-vs-Fire + 2x-vs-Water pair beats a redundant
+        # 2x-vs-Fire + 2x-vs-Fire pair against a Fire/Water opp duo,
+        # which every existing policy gets wrong by ranking both Fire
+        # leads at the same singleton score. Falls back to the
+        # singleton parent at n_active=1 (singles regime), so the
+        # worst case at the degenerate case is parity with the default.
+        ChampionshipStrategy(
+            name="minimax+pair_coverage_selection",
+            team_build_policy=MinimaxTeamBuildPolicy,
+            selection_policy=PairCoverageSelectionPolicy,
         ),
     )
 }
