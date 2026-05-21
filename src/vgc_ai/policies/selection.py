@@ -47,6 +47,16 @@ Negative results recorded (so future tuners don't repeat them):
   at all sample sizes we've tried. Next leverage on selection is
   game-theoretic (LP-minimax over the doubles table for an opponent-
   uncertainty-aware mixed strategy), not more pointwise scoring variants.
+
+``PairCoverageSelectionPolicy`` takes the orthogonal angle: every other
+policy here scores team members independently, then sorts the singletons.
+That aggregation collapses the doubles game state to a singles-equivalent
+-- two identical 2x-Fire leads rank the same regardless of whether
+they're paired against an all-Fire or all-Water opp. PairCoverage scores
+*pairs* (i, j) jointly with max-of-pair offense and max-of-pair defense,
+then picks the best-pair-by-coverage as the leads. Non-decomposable
+signal -- two leads scored identically can compose into very different
+pairs depending on which opp threats they cover jointly.
 """
 
 from __future__ import annotations
@@ -327,11 +337,132 @@ class MetaThreatAwareSelectionPolicy(MatchupAwareSelectionPolicy):
         return ordered[:max_size]
 
 
+def _pair_coverage_score(
+    me_a: Pokemon,
+    me_b: Pokemon,
+    opp_team: Team,
+    params: BattleRuleParam,
+) -> float:
+    """Best-of-pair offense minus worst-of-pair defense, averaged over opp_team.
+
+    Captures the doubles reality that both active leads attack and defend
+    every turn:
+
+    - Offense vs opp k: ``max(off(a, k), off(b, k))`` -- the better-
+      positioned lead targets k. Rewards *complementary* coverage; a
+      2x-vs-Fire + 2x-vs-Water pair covers both threats, where a
+      2x-vs-Fire + 2x-vs-Fire pair has a redundant slot.
+    - Defense vs opp k: ``max(off(k, a), off(k, b))`` -- opp focus-fires
+      whichever of our pair is more vulnerable to k. Penalises pairs
+      where any member is one-shot by a common opp threat; one tanky
+      partner does not paper over a frail one being removed.
+
+    Returns the mean of (best-offense - worst-defense) over the opp
+    team. Aggregation is non-decomposable: two leads scored identically
+    as singletons can compose into very different pairs depending on
+    which opp threats they cover jointly. Returns 0.0 on an empty opp
+    team (matches ``_selection_score`` for the degenerate case).
+    """
+    if not opp_team.members:
+        return 0.0
+    offense = 0.0
+    defense = 0.0
+    for opp in opp_team.members:
+        off_a = _best_offense_multiplier(me_a, opp, params)
+        off_b = _best_offense_multiplier(me_b, opp, params)
+        def_a = _best_offense_multiplier(opp, me_a, params)
+        def_b = _best_offense_multiplier(opp, me_b, params)
+        offense += off_a if off_a > off_b else off_b
+        defense += def_a if def_a > def_b else def_b
+    n = len(opp_team.members)
+    return (offense - defense) / n
+
+
+class PairCoverageSelectionPolicy(MatchupAwareSelectionPolicy):
+    """Order team members by joint-pair coverage of the opponent's team.
+
+    Every other selection policy in the module scores team members
+    *independently* and sorts those singleton scores. That collapses
+    the doubles game state to a singles-equivalent: two identical
+    2x-Fire leads rank the same regardless of whether they share a
+    weakness or counter different opp threats. This policy is the
+    single-axis change vs ``MatchupAwareSelectionPolicy`` -- same
+    type-chart primitive (``_best_offense_multiplier``), pair-level
+    aggregation:
+
+    - For each candidate pair (a, b), score it via
+      ``_pair_coverage_score`` -- best-of-pair offense per opp,
+      worst-of-pair defense per opp, averaged.
+    - The lead pair is the argmax across all ``C(n, 2)`` pairs.
+      ``n`` is the team size (typically <= 6) so the quadratic is
+      cheap and the search exhaustive.
+    - Within the chosen pair, the higher-singleton-score member takes
+      the very first slot (stable on ties: keep the original
+      ``(i, j)`` order so the index tiebreak matches the parent's
+      behaviour at degenerate matchups).
+    - Remaining team slots fill by singleton score (same comparator
+      as the parent) so the reserve order stays comparable across
+      A/B benches.
+
+    Theoretical leverage over the parent:
+
+    - Complementary coverage: a 2x-vs-Fire + 2x-vs-Water pair beats a
+      2x-vs-Fire + 2x-vs-Fire pair against a Fire/Water opp duo,
+      because the singleton-ranker would happily promote the second
+      Fire lead even though it duplicates coverage the first one
+      already provides.
+    - Worst-case defense: a single 2x weakness shared by both leads
+      costs the pair the full 2.0 (max), whereas the singleton-ranker
+      averages it 1/N across opponents and may under-penalise
+      structural fragility.
+
+    Falls back to ``MatchupAwareSelectionPolicy.decision`` when the
+    team is smaller than 2 or ``max_size < 2`` (singles regime) -- so
+    the worst case at ``n_active=1`` is parity with the default.
+
+    Ignores ``meta`` on purpose -- this is the single-axis change vs
+    the type-chart parent, isolating the *pair-aggregation* improvement
+    from any usage-prior or LP-minimax composition.
+    """
+
+    def decision(self, teams: tuple[Team, Team], max_size: int) -> SelectionCommand:
+        my_team, opp_team = teams
+        params: BattleRuleParam = self.params
+        n = len(my_team.members)
+        if n < 2 or max_size < 2:
+            return super().decision(teams, max_size)
+        best_score = -float("inf")
+        best_pair: tuple[int, int] = (0, 1)
+        for i in range(n):
+            me_i = my_team.members[i]
+            for j in range(i + 1, n):
+                s = _pair_coverage_score(me_i, my_team.members[j], opp_team, params)
+                if s > best_score:
+                    best_score = s
+                    best_pair = (i, j)
+        i, j = best_pair
+        si = _selection_score(my_team.members[i], opp_team, params)
+        sj = _selection_score(my_team.members[j], opp_team, params)
+        if sj > si:
+            i, j = j, i
+        leads = [i, j]
+        used = {i, j}
+        rest = sorted(
+            (k for k in range(n) if k not in used),
+            key=lambda k: (
+                -_selection_score(my_team.members[k], opp_team, params),
+                k,
+            ),
+        )
+        return (leads + rest)[:max_size]
+
+
 VgcAiSelectionPolicy = MatchupAwareSelectionPolicy
 
 __all__ = [
     "MatchupAwareSelectionPolicy",
     "MetaThreatAwareSelectionPolicy",
     "MetaWeightedSelectionPolicy",
+    "PairCoverageSelectionPolicy",
     "VgcAiSelectionPolicy",
 ]
