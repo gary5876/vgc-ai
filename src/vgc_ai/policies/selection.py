@@ -57,6 +57,16 @@ they're paired against an all-Fire or all-Water opp. PairCoverage scores
 then picks the best-pair-by-coverage as the leads. Non-decomposable
 signal -- two leads scored identically can compose into very different
 pairs depending on which opp threats they cover jointly.
+
+``SpeedTierAwareSelectionPolicy`` adds the most influential single stat
+the type-chart aggregators ignore: speed. A faster lead may KO a key
+threat before being hit, so an outspeed effectively reduces the
+incoming threat that the static type-chart defense term treats as
+inevitable. Single-axis change vs ``MatchupAwareSelectionPolicy`` --
+same ``_best_offense_multiplier`` primitive, plus a per-opp +/-
+``_INITIATIVE_BONUS`` based on ``Pokemon.stats[Stat.SPEED]`` (the
+post-EV/IV/nature value), so the JOLLY/TIMID + 252 SPE team-build
+spread choices flow through into selection.
 """
 
 from __future__ import annotations
@@ -65,6 +75,7 @@ from vgc2.agent import SelectionCommand, SelectionPolicy
 from vgc2.balance.meta import Meta
 from vgc2.battle_engine import BattleRuleParam
 from vgc2.battle_engine.damage_calculator import type_effectiveness_modifier
+from vgc2.battle_engine.modifiers import Stat
 from vgc2.battle_engine.pokemon import Pokemon
 from vgc2.battle_engine.team import Team
 
@@ -457,6 +468,124 @@ class PairCoverageSelectionPolicy(MatchupAwareSelectionPolicy):
         return (leads + rest)[:max_size]
 
 
+_INITIATIVE_BONUS: float = 0.25
+"""Per-opp net bonus applied to ``offense - defense`` when our lead outspeeds.
+
+Tuned so the speed bonus biases close calls (matchup deltas <~0.25) without
+overriding a real type advantage. A 2x super-effective matchup is worth
++1.0, a 1x trade is 0.0, and a 0.5x resist is -0.5. Initiative is one
+of those secondary signals: an outspeed turns a 1x trade into a slight
+favour for us (we may KO before being hit). Symmetric: an outsped lead
+loses the same magnitude per opp.
+
+Set to 0.25 by inspection: stronger than a 0.5x resist but weaker than a
+2x super-effective hit, so a 2x weakness from the opp still beats a
+clean speed advantage. Calibrated to bias selection without overriding
+type-chart structure."""
+
+
+def _speed_tier_score(
+    my_pkm: Pokemon,
+    opp_team: Team,
+    params: BattleRuleParam,
+    initiative_bonus: float = _INITIATIVE_BONUS,
+) -> float:
+    """Net (offense - defense) plus an initiative term per opp, averaged.
+
+    Same primitive as ``_selection_score`` (``_best_offense_multiplier``
+    on the type chart), plus a per-opp speed-tier term:
+
+    - +``initiative_bonus`` when our final Speed stat strictly exceeds
+      the opp's. Captures the doubles reality that a faster lead may KO
+      a key threat before being hit, mitigating an incoming attack the
+      static type-chart score would otherwise treat as inevitable.
+    - -``initiative_bonus`` when the opp strictly outspeeds. A slow
+      lead pays for being out-paced -- in doubles a 2x super-effective
+      threat that moves first removes the lead before our turn.
+    - 0.0 on a tie. Speed ties roll a coin in vgc2; we don't claim
+      either side gets the bonus.
+
+    Reads ``Pokemon.stats[Stat.SPEED]``, the post-EV/IV/nature value
+    computed at construction time. Bonus magnitude tuned (see
+    ``_INITIATIVE_BONUS``) so the signal biases close calls without
+    overriding the type-chart structure.
+
+    Returns 0.0 on an empty opp team (matches ``_selection_score`` for
+    the degenerate case).
+    """
+    if not opp_team.members:
+        return 0.0
+    my_speed = my_pkm.stats[Stat.SPEED]
+    offense = 0.0
+    defense = 0.0
+    initiative = 0.0
+    for opp in opp_team.members:
+        offense += _best_offense_multiplier(my_pkm, opp, params)
+        defense += _best_offense_multiplier(opp, my_pkm, params)
+        opp_speed = opp.stats[Stat.SPEED]
+        if my_speed > opp_speed:
+            initiative += initiative_bonus
+        elif my_speed < opp_speed:
+            initiative -= initiative_bonus
+    n = len(opp_team.members)
+    return (offense - defense + initiative) / n
+
+
+class SpeedTierAwareSelectionPolicy(MatchupAwareSelectionPolicy):
+    """Type-chart selection with a speed-tier initiative bonus.
+
+    Every other policy in this module scores selection purely on
+    *static* type-chart matchups -- ``_best_offense_multiplier`` on the
+    opponent's defensive types vs our offensive moves and vice versa.
+    Speed is the most influential single stat in doubles that those
+    scores throw away: a faster lead may KO a threat before being hit,
+    so an outspeed effectively reduces the incoming threat that the
+    pure type-chart defense term treats as inevitable.
+
+    Single-axis change vs ``MatchupAwareSelectionPolicy``:
+
+    - Same primitive (``_best_offense_multiplier`` on the type chart),
+      same average-over-opp aggregation.
+    - Adds a per-opp initiative term: +``_INITIATIVE_BONUS`` when our
+      ``stats[Stat.SPEED]`` strictly exceeds the opp's, -``_INITIATIVE_BONUS``
+      when the opp strictly outspeeds, 0.0 on a tie. Stat is the
+      final value (post-EV/IV/nature) computed at ``Pokemon`` build
+      time, so the team-build's JOLLY/TIMID + 252 SPE spread choices
+      flow through into selection.
+
+    Theoretical leverage over the default:
+
+    - Two leads scored identically on the type chart (same offense, same
+      defense averaged across opp) can have very different practical
+      threat exposure depending on speed tier. A 1.0-1.0 trade where we
+      outspeed lets us strike first; the type-chart score is blind.
+    - The bonus is small enough (default 0.25) that it never flips a
+      real 2x super-effective matchup -- a 2x weakness still scores
+      worse than a clean outspeed. So the policy is a strict
+      refinement of the parent: same structure when matchups dominate,
+      tiebroken by speed when they don't.
+
+    Ignores ``meta`` on purpose -- this is the single-axis change vs
+    the type-chart parent, isolating the *speed-tier* improvement from
+    any usage-prior composition. Future compounds can stack speed
+    awareness on top of the meta-weighted offense signal.
+    """
+
+    def decision(self, teams: tuple[Team, Team], max_size: int) -> SelectionCommand:
+        my_team, opp_team = teams
+        params: BattleRuleParam = self.params
+        scored = [
+            (
+                -_speed_tier_score(p, opp_team, params),
+                i,
+            )
+            for i, p in enumerate(my_team.members)
+        ]
+        scored.sort()
+        ordered = [i for _, i in scored]
+        return ordered[:max_size]
+
+
 VgcAiSelectionPolicy = MatchupAwareSelectionPolicy
 
 __all__ = [
@@ -464,5 +593,6 @@ __all__ = [
     "MetaThreatAwareSelectionPolicy",
     "MetaWeightedSelectionPolicy",
     "PairCoverageSelectionPolicy",
+    "SpeedTierAwareSelectionPolicy",
     "VgcAiSelectionPolicy",
 ]

@@ -37,6 +37,7 @@ from vgc_ai.policies.selection import (
     MetaThreatAwareSelectionPolicy,
     MetaWeightedSelectionPolicy,
     PairCoverageSelectionPolicy,
+    SpeedTierAwareSelectionPolicy,
 )
 from vgc_ai.policies.tabular_mc import TabularMCBattlePolicy
 from vgc_ai.policies.teambuild import (
@@ -204,6 +205,25 @@ CHAMPIONSHIP_STRATEGIES: dict[str, ChampionshipStrategy] = {
             name="minimax+pair_coverage_selection",
             team_build_policy=MinimaxTeamBuildPolicy,
             selection_policy=PairCoverageSelectionPolicy,
+        ),
+        # Same LP-minimax team builder as the current default; the
+        # differentiator is the selection layer, which adds a per-opp
+        # speed-tier initiative bonus to the type-chart score. Every
+        # other selection policy throws away the most influential
+        # single stat in doubles: a faster lead may KO a threat before
+        # being hit, so an outspeed effectively reduces the incoming
+        # threat that the static type-chart defense term treats as
+        # inevitable. Reads ``Pokemon.stats[Stat.SPEED]`` -- the
+        # post-EV/IV/nature value -- so the team-build's JOLLY/TIMID +
+        # 252 SPE spread choices flow through into selection. Bonus
+        # magnitude (0.25) tuned so the speed signal biases close
+        # calls without overriding a real 2x super-effective matchup.
+        # Strict refinement of MatchupAware: same structure when
+        # matchups dominate, tiebroken by speed when they don't.
+        ChampionshipStrategy(
+            name="minimax+speed_tier_selection",
+            team_build_policy=MinimaxTeamBuildPolicy,
+            selection_policy=SpeedTierAwareSelectionPolicy,
         ),
     )
 }
