@@ -895,9 +895,139 @@ class MetaThreatPairCoverageSelectionPolicy(MetaThreatAwareSelectionPolicy):
         return (leads + rest)[:max_size]
 
 
+_BP_NORMALIZER: float = 100.0
+"""Divisor for the damage-aware score so it stays on the type-chart scale.
+
+``vgc2.util.generator`` samples ``base_power ~ clip(N(100, 40), 0, 140)``,
+so dividing by 100 puts the average damaging move's neutral hit near the
+type-chart baseline of 1.0 used by every other scorer in this module.
+That keeps relative magnitudes comparable across selection policies and
+keeps the damage-aware score from numerically dwarfing future
+compositions that might add the type-chart primitive back in."""
+
+
+def _best_damage_potential(attacker: Pokemon, defender: Pokemon, params: BattleRuleParam) -> float:
+    """Best ``base_power * STAB * type_eff / _BP_NORMALIZER`` over damaging moves.
+
+    Returns 0.0 if the attacker has no damaging moves (status-only kit) --
+    the natural baseline for "this attacker is a non-threat", lower than
+    any actual hit. Skips moves with ``base_power == 0`` (status moves)
+    the same way ``_best_offense_multiplier`` does.
+
+    The vgc2 damage formula (see ``damage_calculator.calculate_damage``)
+    is linear in ``base_power`` and applies STAB and type effectiveness
+    multiplicatively, so this product is a faithful proxy for raw damage
+    output up to attacker/defender stats. Selection compounds elsewhere
+    in this module use the type-eff multiplier alone, which collapses a
+    40-BP super-effective hit and a 110-BP super-effective hit to the
+    same score; this primitive separates them.
+    """
+    best = 0.0
+    attacker_types = set(attacker.species.types)
+    for move in attacker.moves:
+        if move.base_power == 0:
+            continue
+        stab = 1.5 if move.pkm_type in attacker_types else 1.0
+        eff = type_effectiveness_modifier(params, move.pkm_type, defender.species.types)
+        dmg = float(move.base_power) * stab * eff
+        if dmg > best:
+            best = dmg
+    return best / _BP_NORMALIZER
+
+
+def _damage_threat_score(my_pkm: Pokemon, opp_team: Team, params: BattleRuleParam) -> float:
+    """Mean damage-aware offense minus worst-case damage-aware threat.
+
+    Composes the damage-aware primitive with the threat-aware defense shape
+    used by the current championship default:
+
+    - Offense: ``mean_k _best_damage_potential(my, opp_k)`` -- uniform over
+      the opp team, matching the type-chart parent. Mean (not max) because
+      we don't know which opp the lead will face first; averaging is the
+      conservative substitute for the unknown opponent-selection draw.
+    - Defense: ``max_k _best_damage_potential(opp_k, my)`` -- worst-case
+      across the opp team. A single opp with a high-BP SE move one-shots
+      the lead in doubles, so worst-case survival dominates average
+      threat (same argument as ``MetaThreatAwareSelectionPolicy``).
+
+    Returns 0.0 on an empty opp team -- matches every other scorer's
+    degenerate case so an empty-opp fallback path lands on a stable
+    index-tiebroken sort.
+    """
+    if not opp_team.members:
+        return 0.0
+    offense_total = 0.0
+    max_defense = 0.0
+    for opp in opp_team.members:
+        offense_total += _best_damage_potential(my_pkm, opp, params)
+        threat = _best_damage_potential(opp, my_pkm, params)
+        if threat > max_defense:
+            max_defense = threat
+    return (offense_total / len(opp_team.members)) - max_defense
+
+
+class DamageThreatSelectionPolicy(MatchupAwareSelectionPolicy):
+    """Order team members by damage-aware offense minus worst-case threat.
+
+    Every other policy in this module ranks leads on the type-effectiveness
+    multiplier alone -- ``_best_offense_multiplier`` returns 1x / 2x / 4x /
+    0.5x and ignores ``move.base_power`` entirely. The vgc2 damage formula
+    (``damage_calculator.calculate_damage``) is linear in ``base_power``,
+    so collapsing it loses real signal: a 40-BP super-effective move
+    ranks identically to a 110-BP super-effective move in the type-chart
+    proxy, even though the high-BP move puts roughly 2.75x more raw
+    damage on the table.
+
+    Single-axis change vs ``MatchupAwareSelectionPolicy``:
+
+    - Replaces ``_best_offense_multiplier`` with ``_best_damage_potential``
+      = ``max_move (base_power * STAB * type_eff) / _BP_NORMALIZER``.
+    - Replaces the symmetric mean-mean aggregation with mean-offense
+      (uniform over the unknown opp draw) and max-defense (worst-case
+      threat, same shape as ``MetaThreatAwareSelectionPolicy``'s
+      threat-aware fallback path).
+
+    Theoretical leverage over the current default
+    (``matchup_table+matchup_aware``):
+
+    - A 60-BP STAB 2x-SE hit (score 60 * 1.5 * 2 / 100 = 1.80) outranks a
+      30-BP STAB 2x-SE hit (score 0.90) where the type-chart proxy ties
+      them at 2.0 each. The team-build's ``_move_priority`` already
+      prefers high-BP STAB moves, so leads with stronger move kits get
+      promoted under selection too -- coherent across the stack.
+    - Worst-case defense: a single 110-BP STAB 2x-SE opp move
+      (threat = 3.30) costs the full hit, not its 1/N share of the
+      mean -- correct under doubles physics because one threat is
+      enough to remove the lead.
+    - Ignores ``meta`` on purpose -- this isolates the *damage-aware*
+      single-axis improvement from any usage-prior or pair-aggregation
+      composition. Future compounds can stack meta-weighting or
+      pair-coverage on top of this primitive.
+
+    Falls back to a stable index sort when the opp team is empty
+    (``_damage_threat_score`` returns 0.0 for every member), matching
+    the degenerate-case behaviour of every other scorer here.
+    """
+
+    def decision(self, teams: tuple[Team, Team], max_size: int) -> SelectionCommand:
+        my_team, opp_team = teams
+        params: BattleRuleParam = self.params
+        scored = [
+            (
+                -_damage_threat_score(p, opp_team, params),
+                i,
+            )
+            for i, p in enumerate(my_team.members)
+        ]
+        scored.sort()
+        ordered = [i for _, i in scored]
+        return ordered[:max_size]
+
+
 VgcAiSelectionPolicy = MatchupAwareSelectionPolicy
 
 __all__ = [
+    "DamageThreatSelectionPolicy",
     "MatchupAwareSelectionPolicy",
     "MetaThreatAwareSelectionPolicy",
     "MetaThreatPairCoverageSelectionPolicy",
