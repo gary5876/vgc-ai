@@ -67,6 +67,15 @@ same ``_best_offense_multiplier`` primitive, plus a per-opp +/-
 ``_INITIATIVE_BONUS`` based on ``Pokemon.stats[Stat.SPEED]`` (the
 post-EV/IV/nature value), so the JOLLY/TIMID + 252 SPE team-build
 spread choices flow through into selection.
+
+``SpeedPairCoverageSelectionPolicy`` composes the two strongest
+single-axis selection improvements -- pair-level coverage aggregation
+(``PairCoverageSelectionPolicy``) and per-opp speed-tier initiative
+(``SpeedTierAwareSelectionPolicy``) -- into one pair scorer. Each
+lead in the pair contributes independently to the initiative term per
+opp, matching the doubles reality that both leads attack and defend
+every turn. Strict refinement of the pair-coverage parent: recovers
+the parent when all speeds tie.
 """
 
 from __future__ import annotations
@@ -586,6 +595,126 @@ class SpeedTierAwareSelectionPolicy(MatchupAwareSelectionPolicy):
         return ordered[:max_size]
 
 
+def _speed_pair_coverage_score(
+    me_a: Pokemon,
+    me_b: Pokemon,
+    opp_team: Team,
+    params: BattleRuleParam,
+    initiative_bonus: float = _INITIATIVE_BONUS,
+) -> float:
+    """Pair-coverage score plus per-opp speed-tier initiative.
+
+    Composes the two strongest single-axis selection improvements:
+
+    - ``_pair_coverage_score``: max-of-pair offense and max-of-pair
+      defense per opp -- captures complementary type coverage and
+      worst-case threat focus.
+    - ``_speed_tier_score`` initiative: +/- ``initiative_bonus`` per
+      lead-opp pair based on the ``stats[Stat.SPEED]`` comparison.
+      Each lead in the pair contributes independently because both
+      leads attack and defend every turn in doubles -- two outspeeds
+      vs one opp is genuinely twice as valuable as one outspeed.
+
+    Returns the average over the opp team of
+    ``(best-offense - worst-defense + lead_a_init + lead_b_init)``.
+    Strict refinement of ``_pair_coverage_score``: recovers the parent
+    when all speeds tie (initiative term is zero). Returns 0.0 on an
+    empty opp team.
+    """
+    if not opp_team.members:
+        return 0.0
+    a_speed = me_a.stats[Stat.SPEED]
+    b_speed = me_b.stats[Stat.SPEED]
+    offense = 0.0
+    defense = 0.0
+    initiative = 0.0
+    for opp in opp_team.members:
+        off_a = _best_offense_multiplier(me_a, opp, params)
+        off_b = _best_offense_multiplier(me_b, opp, params)
+        def_a = _best_offense_multiplier(opp, me_a, params)
+        def_b = _best_offense_multiplier(opp, me_b, params)
+        offense += off_a if off_a > off_b else off_b
+        defense += def_a if def_a > def_b else def_b
+        opp_speed = opp.stats[Stat.SPEED]
+        if a_speed > opp_speed:
+            initiative += initiative_bonus
+        elif a_speed < opp_speed:
+            initiative -= initiative_bonus
+        if b_speed > opp_speed:
+            initiative += initiative_bonus
+        elif b_speed < opp_speed:
+            initiative -= initiative_bonus
+    n = len(opp_team.members)
+    return (offense - defense + initiative) / n
+
+
+class SpeedPairCoverageSelectionPolicy(MatchupAwareSelectionPolicy):
+    """Pair-coverage selection scoring with per-lead speed-tier initiative.
+
+    Composes the two strongest single-axis selection improvements --
+    ``PairCoverageSelectionPolicy`` (joint pair coverage) and
+    ``SpeedTierAwareSelectionPolicy`` (per-opp speed-tier initiative) --
+    into one pair scorer. Each lead contributes independently to the
+    initiative term per opp, matching the doubles reality that both
+    leads attack and defend every turn (two outspeeds vs one opp is
+    genuinely twice as valuable as one outspeed).
+
+    Decision shape mirrors ``PairCoverageSelectionPolicy``:
+
+    - Argmax over all ``C(n, 2)`` candidate pairs by
+      ``_speed_pair_coverage_score``.
+    - Within the chosen pair, the higher-speed-tier-singleton-score
+      member takes the very first slot (stable on ties: original
+      ``(i, j)`` order so the index tiebreak matches the parent).
+    - Remaining slots fill by ``_speed_tier_score`` so the reserve
+      order also reflects the speed-aware signal.
+
+    Falls back to ``_speed_tier_score`` singleton ranking when the
+    team is smaller than 2 or ``max_size < 2`` (singles regime). Both
+    parents are strict refinements: pair-coverage when speeds tie,
+    speed-tier in the singles fallback.
+
+    Ignores ``meta`` on purpose -- this composes the two type-chart
+    structural improvements without entangling the usage-prior axis.
+    Future compounds can stack meta-weighting on top of this signal.
+    """
+
+    def decision(self, teams: tuple[Team, Team], max_size: int) -> SelectionCommand:
+        my_team, opp_team = teams
+        params: BattleRuleParam = self.params
+        n = len(my_team.members)
+        if n < 2 or max_size < 2:
+            scored_single = [
+                (-_speed_tier_score(p, opp_team, params), i) for i, p in enumerate(my_team.members)
+            ]
+            scored_single.sort()
+            return [i for _, i in scored_single][:max_size]
+        best_score = -float("inf")
+        best_pair: tuple[int, int] = (0, 1)
+        for i in range(n):
+            me_i = my_team.members[i]
+            for j in range(i + 1, n):
+                s = _speed_pair_coverage_score(me_i, my_team.members[j], opp_team, params)
+                if s > best_score:
+                    best_score = s
+                    best_pair = (i, j)
+        i, j = best_pair
+        si = _speed_tier_score(my_team.members[i], opp_team, params)
+        sj = _speed_tier_score(my_team.members[j], opp_team, params)
+        if sj > si:
+            i, j = j, i
+        leads = [i, j]
+        used = {i, j}
+        rest = sorted(
+            (k for k in range(n) if k not in used),
+            key=lambda k: (
+                -_speed_tier_score(my_team.members[k], opp_team, params),
+                k,
+            ),
+        )
+        return (leads + rest)[:max_size]
+
+
 VgcAiSelectionPolicy = MatchupAwareSelectionPolicy
 
 __all__ = [
@@ -593,6 +722,7 @@ __all__ = [
     "MetaThreatAwareSelectionPolicy",
     "MetaWeightedSelectionPolicy",
     "PairCoverageSelectionPolicy",
+    "SpeedPairCoverageSelectionPolicy",
     "SpeedTierAwareSelectionPolicy",
     "VgcAiSelectionPolicy",
 ]
