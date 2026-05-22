@@ -37,6 +37,7 @@ from vgc_ai.policies.selection import (
     MetaThreatAwareSelectionPolicy,
     MetaWeightedSelectionPolicy,
     PairCoverageSelectionPolicy,
+    SpeedPairCoverageSelectionPolicy,
     SpeedTierAwareSelectionPolicy,
 )
 from vgc_ai.policies.tabular_mc import TabularMCBattlePolicy
@@ -224,6 +225,25 @@ CHAMPIONSHIP_STRATEGIES: dict[str, ChampionshipStrategy] = {
             name="minimax+speed_tier_selection",
             team_build_policy=MinimaxTeamBuildPolicy,
             selection_policy=SpeedTierAwareSelectionPolicy,
+        ),
+        # Composes the two strongest single-axis selection improvements
+        # already in the registry -- PairCoverage (joint pair coverage,
+        # 70% pooled win rate vs current default) and SpeedTier (per-opp
+        # initiative bonus, 73.3% pooled win rate vs current default) --
+        # into one pair scorer. Each lead contributes independently to
+        # the initiative term per opp, matching the doubles reality that
+        # both leads attack and defend every turn (two outspeeds vs one
+        # opp is genuinely twice as valuable as one outspeed). Strict
+        # refinement of both parents: pair-coverage when all speeds tie,
+        # speed-tier in the singles fallback. Same LP-minimax team
+        # builder as the current default so the comparison isolates the
+        # selection-layer composition. Ignores meta on purpose -- this
+        # is the pure type-chart + speed-tier improvement, leaving
+        # meta-weighting for a future stack.
+        ChampionshipStrategy(
+            name="minimax+speed_pair_coverage_selection",
+            team_build_policy=MinimaxTeamBuildPolicy,
+            selection_policy=SpeedPairCoverageSelectionPolicy,
         ),
     )
 }
