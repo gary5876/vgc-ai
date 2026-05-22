@@ -47,6 +47,7 @@ from vgc_ai.policies.teambuild import (
     MatchupTableTeamBuildPolicy,
     MetaCoverageTeamBuildPolicy,
     MetaUsageTeamBuildPolicy,
+    MinimaxMetaTeamBuildPolicy,
     MinimaxTeamBuildPolicy,
     PrincipledCoverageTeamBuildPolicy,
 )
@@ -273,6 +274,24 @@ CHAMPIONSHIP_STRATEGIES: dict[str, ChampionshipStrategy] = {
             name="minimax+damage_threat_selection",
             team_build_policy=MinimaxTeamBuildPolicy,
             selection_policy=DamageThreatSelectionPolicy,
+        ),
+        # Team builder is MinimaxMeta — same LP shape as the current
+        # default's builder, but the objective is the convex combination
+        # (1-blend)*v + blend*<p, M @ q*> where q* is the meta usage
+        # prior. blend=0.5 (the default) keeps half the Nash robustness
+        # while letting the LP exploit observed opponent preferences.
+        # Composed with MetaThreatAwareSelectionPolicy so this entry
+        # varies ONLY the team-build axis vs that selection layer — the
+        # bench delta isolates team-build meta consumption from
+        # selection-side meta consumption. Falls back to pure Nash
+        # behavior at epoch 0 (uniform meta prior detected and
+        # short-circuited in MinimaxMetaTeamBuildPolicy.decision), so
+        # the worst case at the degenerate epoch is parity with the
+        # parent builder.
+        ChampionshipStrategy(
+            name="minimax_meta+meta_threat_aware_selection",
+            team_build_policy=MinimaxMetaTeamBuildPolicy,
+            selection_policy=MetaThreatAwareSelectionPolicy,
         ),
     )
 }
