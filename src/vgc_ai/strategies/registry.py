@@ -35,6 +35,7 @@ from vgc_ai.policies.rule_balance import DefaultRuleBalancePolicy
 from vgc_ai.policies.selection import (
     MatchupAwareSelectionPolicy,
     MetaThreatAwareSelectionPolicy,
+    MetaThreatPairCoverageSelectionPolicy,
     MetaWeightedSelectionPolicy,
     PairCoverageSelectionPolicy,
     SpeedPairCoverageSelectionPolicy,
@@ -244,6 +245,28 @@ CHAMPIONSHIP_STRATEGIES: dict[str, ChampionshipStrategy] = {
             name="minimax+speed_pair_coverage_selection",
             team_build_policy=MinimaxTeamBuildPolicy,
             selection_policy=SpeedPairCoverageSelectionPolicy,
+        ),
+        # Composes the three strongest single-axis selection improvements
+        # already in the registry into one pair scorer over the same
+        # LP-minimax team. Pair-coverage aggregation (the
+        # PairCoverageSelectionPolicy insight: 66.7% pooled vs the prior
+        # default) catches the redundancy blindspot the singleton scorer
+        # has -- two identical 2x-Fire leads no longer rank equally
+        # against a Fire/Water opp duo. Meta-weighted offense (the
+        # MetaWeightedSelectionPolicy insight) biases the offense
+        # aggregation toward high-usage opponents. Worst-case (max)
+        # threat defense (the MetaThreatAwareSelectionPolicy insight,
+        # current default's selection layer) keeps the full 2.0 cost
+        # of a super-effective threat instead of averaging it away.
+        # Each component is a refinement of the current default along
+        # an orthogonal axis; the composition is the natural three-way
+        # union. Falls back to MetaThreatAwareSelectionPolicy at the
+        # degenerate singles case (n_active=1 or n<2), so the worst
+        # case is parity with the current default.
+        ChampionshipStrategy(
+            name="minimax+meta_threat_pair_coverage_selection",
+            team_build_policy=MinimaxTeamBuildPolicy,
+            selection_policy=MetaThreatPairCoverageSelectionPolicy,
         ),
     )
 }
