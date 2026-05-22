@@ -715,11 +715,192 @@ class SpeedPairCoverageSelectionPolicy(MatchupAwareSelectionPolicy):
         return (leads + rest)[:max_size]
 
 
+def _meta_threat_pair_coverage_score(
+    me_a: Pokemon,
+    me_b: Pokemon,
+    opp_team: Team,
+    weights: list[float],
+    params: BattleRuleParam,
+) -> float:
+    """Meta-weighted pair-coverage offense minus worst-case pair threat.
+
+    Three-way composition of the strongest selection signals already in the
+    module:
+
+    - Pair-coverage aggregation (the ``PairCoverageSelectionPolicy``
+      insight): per-opp ``pair_off_k = max(off(a, k), off(b, k))`` rewards
+      complementary type coverage between the two leads.
+    - Meta-weighted offense (the ``MetaWeightedSelectionPolicy`` insight):
+      offense aggregated as ``sum_k w_k * pair_off_k`` so high-usage opp
+      species drive the offense signal more than rare ones.
+    - Worst-case (max) threat defense (the ``MetaThreatAwareSelectionPolicy``
+      insight): ``defense = max_k max(off(k, a), off(k, b))``. The outer
+      max isn't usage-weighted on purpose -- a 2x super-effective threat
+      that one-shots whichever lead is more vulnerable still removes the
+      lead even if the opp's usage rate of it is below average, and the
+      damage doesn't get diluted by usage probability once the species is
+      on the field.
+
+    ``weights`` must already sum to 1; computed once per ``decision`` call
+    by ``_opp_usage_weights``. Returns 0.0 on an empty opp team.
+    """
+    if not opp_team.members:
+        return 0.0
+    weighted_offense = 0.0
+    max_defense = 0.0
+    for opp, w in zip(opp_team.members, weights, strict=True):
+        off_a = _best_offense_multiplier(me_a, opp, params)
+        off_b = _best_offense_multiplier(me_b, opp, params)
+        pair_offense = off_a if off_a > off_b else off_b
+        weighted_offense += w * pair_offense
+        def_a = _best_offense_multiplier(opp, me_a, params)
+        def_b = _best_offense_multiplier(opp, me_b, params)
+        pair_threat = def_a if def_a > def_b else def_b
+        if pair_threat > max_defense:
+            max_defense = pair_threat
+    return weighted_offense - max_defense
+
+
+def _threat_aware_pair_coverage_score(
+    me_a: Pokemon,
+    me_b: Pokemon,
+    opp_team: Team,
+    params: BattleRuleParam,
+) -> float:
+    """(mean pair-offense - max pair-defense); meta-absent fallback for the pair scorer.
+
+    Same pair-aggregation primitive as ``_meta_threat_pair_coverage_score``
+    but the offense is a uniform mean across the opp team instead of a
+    usage-weighted sum. Used whenever the meta has no usable data yet
+    (epoch 0 of every championship). Returns 0.0 on an empty opp team.
+    """
+    if not opp_team.members:
+        return 0.0
+    offense_total = 0.0
+    max_defense = 0.0
+    for opp in opp_team.members:
+        off_a = _best_offense_multiplier(me_a, opp, params)
+        off_b = _best_offense_multiplier(me_b, opp, params)
+        offense_total += off_a if off_a > off_b else off_b
+        def_a = _best_offense_multiplier(opp, me_a, params)
+        def_b = _best_offense_multiplier(opp, me_b, params)
+        pair_threat = def_a if def_a > def_b else def_b
+        if pair_threat > max_defense:
+            max_defense = pair_threat
+    return (offense_total / len(opp_team.members)) - max_defense
+
+
+class MetaThreatPairCoverageSelectionPolicy(MetaThreatAwareSelectionPolicy):
+    """Meta-weighted pair-coverage offense minus worst-case pair threat.
+
+    Composes the three strongest single-axis selection improvements from
+    the rest of this module into one pair scorer:
+
+    - From ``PairCoverageSelectionPolicy``: pair-level joint scoring of
+      every ``C(n, 2)`` candidate lead pair instead of independent
+      singletons. Captures the doubles reality that two leads scored
+      identically on the type chart can compose into very different
+      pairs depending on how their coverage and weaknesses overlap.
+    - From ``MetaWeightedSelectionPolicy``: usage-weighted opponent
+      aggregation for the offense term, so a 50%-usage staple drives
+      the score more than a 5%-usage curiosity at the same team slot.
+    - From ``MetaThreatAwareSelectionPolicy`` (the current default's
+      selection layer): worst-case (max) threat defense -- a single 2x
+      super-effective threat that one-shots whichever of our leads is
+      more vulnerable removes that lead in doubles, regardless of the
+      threat's usage rate. The outer max stays uniform across opp
+      members on purpose; damage doesn't get diluted by usage
+      probability once the species is on the field.
+
+    Decision shape mirrors ``PairCoverageSelectionPolicy``:
+
+    - Argmax over all ``C(n, 2)`` candidate pairs by
+      ``_meta_threat_pair_coverage_score`` (uniform-mean fallback when
+      the meta is absent / epoch 0 / all-zero usage).
+    - Within the chosen pair, the higher-singleton-score member takes
+      the very first slot. Singleton scorer for the tiebreak is the
+      parent's meta-threat-aware singleton score
+      (``_meta_threat_aware_selection_score`` when meta is usable, the
+      ``_threat_aware_uniform_score`` fallback otherwise) so the
+      ordering decision uses the same signal as the pair selection
+      step. Stable on ties: keep the original ``(i, j)`` order.
+    - Remaining slots fill by the same singleton score so the reserve
+      order also reflects the meta-threat-aware signal -- important
+      because reserves may be brought in later, and a non-meta-aware
+      ranker would scramble the strict generalization claim.
+
+    Falls back to ``MetaThreatAwareSelectionPolicy.decision`` when the
+    team is smaller than 2 or ``max_size < 2`` (singles regime). The
+    parent itself falls back to (uniform_mean_offense - max_defense)
+    singleton ranking when the meta is empty, so the worst case at the
+    degenerate singles case is parity with the current default.
+
+    Theoretical leverage over each parent in turn:
+
+    - vs ``PairCoverageSelectionPolicy``: uses usage data to bias offense
+      toward counters of actually-played species; uses max-threat
+      defense per opp (still over a pair) instead of mean-of-pair
+      averaged over opp. Both refinements correct under the same
+      doubles physics that motivated the parents individually.
+    - vs ``MetaThreatAwareSelectionPolicy`` (the current default's
+      selection layer): swaps singleton scoring for joint-pair scoring.
+      The pair view fixes the redundancy blindspot the singleton
+      ranker has -- two identical 2x-Fire leads no longer rank
+      equally against a Fire/Water opp duo, because the pair view
+      penalises the missing Water coverage that singletons can't see.
+    - vs ``MetaWeightedSelectionPolicy``: adds the pair-coverage AND
+      max-threat structural improvements stacked on the same
+      usage-prior axis.
+    """
+
+    def decision(self, teams: tuple[Team, Team], max_size: int) -> SelectionCommand:
+        my_team, opp_team = teams
+        n = len(my_team.members)
+        if n < 2 or max_size < 2:
+            return super().decision(teams, max_size)
+        params: BattleRuleParam = self.params
+        weights = _opp_usage_weights(self._meta, opp_team)
+
+        def pair_score(i: int, j: int) -> float:
+            if weights is None:
+                return _threat_aware_pair_coverage_score(
+                    my_team.members[i], my_team.members[j], opp_team, params
+                )
+            return _meta_threat_pair_coverage_score(
+                my_team.members[i], my_team.members[j], opp_team, weights, params
+            )
+
+        def singleton_score(k: int) -> float:
+            if weights is None:
+                return _threat_aware_uniform_score(my_team.members[k], opp_team, params)
+            return _meta_threat_aware_selection_score(my_team.members[k], opp_team, weights, params)
+
+        best_score = -float("inf")
+        best_pair: tuple[int, int] = (0, 1)
+        for i in range(n):
+            for j in range(i + 1, n):
+                s = pair_score(i, j)
+                if s > best_score:
+                    best_score = s
+                    best_pair = (i, j)
+        i, j = best_pair
+        if singleton_score(j) > singleton_score(i):
+            i, j = j, i
+        leads = [i, j]
+        used = {i, j}
+        rest = sorted(
+            (k for k in range(n) if k not in used),
+            key=lambda k: (-singleton_score(k), k),
+        )
+        return (leads + rest)[:max_size]
+
+
 VgcAiSelectionPolicy = MatchupAwareSelectionPolicy
 
 __all__ = [
     "MatchupAwareSelectionPolicy",
     "MetaThreatAwareSelectionPolicy",
+    "MetaThreatPairCoverageSelectionPolicy",
     "MetaWeightedSelectionPolicy",
     "PairCoverageSelectionPolicy",
     "SpeedPairCoverageSelectionPolicy",
