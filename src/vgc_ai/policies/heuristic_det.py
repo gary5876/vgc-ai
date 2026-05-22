@@ -32,6 +32,7 @@ from __future__ import annotations
 
 from vgc2.agent import BattlePolicy
 from vgc2.agent.battle import GreedyBattlePolicy, get_actions
+from vgc2.balance.meta import Meta
 from vgc2.battle_engine import BattleCommand, BattleRuleParam, State
 from vgc2.battle_engine.view import TeamView
 from vgc2.util.forward import copy_state, forward
@@ -56,11 +57,41 @@ class HeuristicDetBattlePolicy(BattlePolicy):  # type: ignore[misc]
     def __init__(self) -> None:
         self._opp = GreedyBattlePolicy()
         self._fallback = GreedyBattlePolicy()
+        self._usage_weights: dict[int, float] | None = None
 
     def set_params(self, params: BattleRuleParam) -> None:
         super().set_params(params)
         self._opp.set_params(params)
         self._fallback.set_params(params)
+
+    def set_meta(self, meta: Meta) -> None:
+        # Championship Track 2026 hook. Precompute a species_id->usage_rate
+        # cache once per match so the per-state eval is O(1) dict lookup
+        # instead of re-calling BasicMeta.usage_rate_pokemon (which raises
+        # ZeroDivisionError at epoch 0 and would cost an exception per
+        # evaluate() call otherwise). Counting mirrors BasicMeta._update_usage:
+        # each species contributes once per team it appeared on (within-team
+        # duplicates collapse), divided by len(record) * 2 to match the
+        # framework's usage_rate denominator. Cache stays None when there's
+        # no usable data; evaluate() then takes the uniform path that's
+        # bit-identical to the pre-meta behavior.
+        super().set_meta(meta)
+        record = getattr(meta, "record", None)
+        if not record:
+            self._usage_weights = None
+            return
+        counts: dict[int, int] = {}
+        for team_pair, _winner, _elo in record:
+            for team in team_pair:
+                seen: set[int] = set()
+                for member in team.members:
+                    sid = member.species.id
+                    if sid in seen:
+                        continue
+                    seen.add(sid)
+                    counts[sid] = counts.get(sid, 0) + 1
+        denom = float(len(record) * 2)
+        self._usage_weights = {sid: c / denom for sid, c in counts.items()}
 
     def decision(
         self,
@@ -87,7 +118,7 @@ class HeuristicDetBattlePolicy(BattlePolicy):  # type: ignore[misc]
                 eff_rng=_EFF_RNG,
                 sta_rng=_STA_RNG,
             )
-            value = evaluate(simulated, self.params)
+            value = evaluate(simulated, self.params, usage_weights=self._usage_weights)
             if value > best_value:
                 best_value = value
                 best_action = list(action)
