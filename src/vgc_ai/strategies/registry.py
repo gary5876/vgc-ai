@@ -33,6 +33,7 @@ from vgc_ai.policies.library_teambuild import LibraryTeamBuildPolicy
 from vgc_ai.policies.meta_balance import NoOpMetaBalancePolicy
 from vgc_ai.policies.rule_balance import DefaultRuleBalancePolicy
 from vgc_ai.policies.selection import (
+    DamageThreatSelectionPolicy,
     MatchupAwareSelectionPolicy,
     MetaThreatAwareSelectionPolicy,
     MetaThreatPairCoverageSelectionPolicy,
@@ -267,6 +268,11 @@ CHAMPIONSHIP_STRATEGIES: dict[str, ChampionshipStrategy] = {
             name="minimax+meta_threat_pair_coverage_selection",
             team_build_policy=MinimaxTeamBuildPolicy,
             selection_policy=MetaThreatPairCoverageSelectionPolicy,
+        ),
+        ChampionshipStrategy(
+            name="minimax+damage_threat_selection",
+            team_build_policy=MinimaxTeamBuildPolicy,
+            selection_policy=DamageThreatSelectionPolicy,
         ),
     )
 }
