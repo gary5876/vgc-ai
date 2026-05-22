@@ -40,7 +40,13 @@ while true; do
     log="${LOG_DIR}/round-${ts}.log"
     {
         echo "=== round ${ts} ==="
-        git pull --quiet || true
+        # Defensive: the proposer leaves the working tree on auto/* branches
+        # after pushing a candidate PR; without this checkout the next pull
+        # tracks the auto branch, the loop never picks up merged PRs, and
+        # the bench data we generate isn't comparable to current main.
+        git fetch --quiet origin main || true
+        git checkout --quiet main || true
+        git pull --ff-only --quiet || true
         uv sync --quiet || true
         echo "--- run_continuous (n=${CONTINUOUS_N}) ---"
         uv run python -m bench.run_continuous --n "${CONTINUOUS_N}" || true
