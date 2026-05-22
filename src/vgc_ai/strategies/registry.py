@@ -33,6 +33,7 @@ from vgc_ai.policies.library_teambuild import LibraryTeamBuildPolicy
 from vgc_ai.policies.meta_balance import NoOpMetaBalancePolicy
 from vgc_ai.policies.rule_balance import DefaultRuleBalancePolicy
 from vgc_ai.policies.selection import (
+    DamageEstimateSelectionPolicy,
     MatchupAwareSelectionPolicy,
     MetaThreatAwareSelectionPolicy,
     MetaWeightedSelectionPolicy,
@@ -243,6 +244,25 @@ CHAMPIONSHIP_STRATEGIES: dict[str, ChampionshipStrategy] = {
             name="minimax+stab_aware_selection",
             team_build_policy=MinimaxTeamBuildPolicy,
             selection_policy=StabAwareSelectionPolicy,
+        ),
+        # Same LP-minimax team builder as the current default; the
+        # differentiator is the selection layer, which folds the primary
+        # damage-formula scalars vgc2 actually uses into the per-move
+        # multiplier: STAB * type_effectiveness * (base_power / 100) *
+        # accuracy. Every other selection policy collapses move strength
+        # to its type-chart multiplier alone, so a 60 BP STAB 2x super-
+        # effective move (1.8 effective potency) ranks identically to a
+        # 130 BP STAB 2x move (3.9 effective potency) -- a 2.2x damage
+        # gap. The team builder already ranks moves by base_power (see
+        # teambuild._move_priority); this finally lets selection consume
+        # that signal end-to-end. At the reference point (100 BP, 100%
+        # accuracy, no STAB on either side) the score collapses to the
+        # MatchupAware parent, so the worst case at uniform scalars is
+        # parity with the type-chart baseline.
+        ChampionshipStrategy(
+            name="minimax+damage_estimate_selection",
+            team_build_policy=MinimaxTeamBuildPolicy,
+            selection_policy=DamageEstimateSelectionPolicy,
         ),
     )
 }

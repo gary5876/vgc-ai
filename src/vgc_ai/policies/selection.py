@@ -699,9 +699,143 @@ class StabAwareSelectionPolicy(MatchupAwareSelectionPolicy):
         return ordered[:max_size]
 
 
+_DAMAGE_BP_REFERENCE: float = 100.0
+"""Reference base power for normalising the damage-estimate multiplier.
+
+A 100 BP move with neutral type-effectiveness, no STAB, and 100% accuracy
+scores 1.0 -- matching the parent's neutral baseline. So when every
+candidate carries 100 BP perfect-accuracy moves and neither side has STAB,
+``DamageEstimateSelectionPolicy`` collapses to ``MatchupAwareSelectionPolicy``
+on the type chart alone. Picked 100 (rather than e.g. the per-roster max
+BP) so the scale stays comparable across rosters and across A/B benches --
+there's nothing to tune per match."""
+
+
+def _best_damage_estimate_multiplier(
+    attacker: Pokemon, defender: Pokemon, params: BattleRuleParam
+) -> float:
+    """Best damage-estimate multiplier from attacker's damaging moves vs defender.
+
+    Folds the primary scalars from vgc2's damage formula into the per-move
+    score: ``base_power / 100 * accuracy * STAB * type_effectiveness``. The
+    type-chart-only primitive used by every other selection policy here
+    collapses move strength to its multiplier alone -- so a 60 BP STAB 2x
+    super-effective move (1.8 effective potency) ranks identically to a
+    130 BP STAB 2x move (3.9 effective potency), a 2.2x damage gap. This
+    primitive ranks them correctly.
+
+    Per-move score: ``(base_power / 100) * accuracy * stab * type_eff``,
+    where ``stab`` is ``params.STAB_MODIFIER`` when ``move.pkm_type`` is in
+    the attacker's species types, else 1.0. Skips ``base_power == 0`` (status
+    moves). Returns 1.0 if the attacker has no damaging moves -- the same
+    neutral baseline as the parent primitives. Scale chosen so a 100 BP
+    perfect-accuracy non-STAB neutral move scores 1.0, matching the type-chart
+    parent at the reference point.
+    """
+    best = 1.0
+    attacker_types = attacker.species.types
+    stab = params.STAB_MODIFIER
+    for move in attacker.moves:
+        if move.base_power == 0:
+            continue
+        m = type_effectiveness_modifier(params, move.pkm_type, defender.species.types)
+        if move.pkm_type in attacker_types:
+            m *= stab
+        m *= move.base_power / _DAMAGE_BP_REFERENCE
+        m *= move.accuracy
+        if m > best:
+            best = m
+    return best
+
+
+def _damage_estimate_selection_score(
+    my_pkm: Pokemon, opp_team: Team, params: BattleRuleParam
+) -> float:
+    """Net (damage-estimate offense - damage-estimate defense) averaged over opp_team.
+
+    Same shape as ``_selection_score`` -- mean of best-offense across both
+    directions -- but uses ``_best_damage_estimate_multiplier`` on both legs
+    so move base power, accuracy, and STAB all flow through. Returns 0.0 on
+    an empty opp team (matches the parent for the degenerate case).
+    """
+    if not opp_team.members:
+        return 0.0
+    offense = 0.0
+    defense = 0.0
+    for opp in opp_team.members:
+        offense += _best_damage_estimate_multiplier(my_pkm, opp, params)
+        defense += _best_damage_estimate_multiplier(opp, my_pkm, params)
+    n = len(opp_team.members)
+    return (offense - defense) / n
+
+
+class DamageEstimateSelectionPolicy(MatchupAwareSelectionPolicy):
+    """Order team members by net damage-estimate matchup vs the opponent's team.
+
+    Every other selection policy in this module scores moves via
+    ``_best_offense_multiplier`` (raw type chart) or
+    ``_best_stab_offense_multiplier`` (type chart + STAB). Both throw away
+    the two most influential move scalars in vgc2's damage formula:
+
+    - ``base_power``: the formula starts at ``... * move.base_power``, so a
+      60 BP move deals roughly 46% of a 130 BP move's damage at otherwise-equal
+      everything. Existing policies treat both moves as equivalent if they
+      share type and STAB.
+    - ``accuracy``: vgc2 rolls accuracy at hit-time. A 50%-accuracy 130 BP
+      STAB 2x move expects half its listed damage; ranking it the same as a
+      100%-accuracy version overestimates the lead's offensive presence.
+
+    Single-axis change vs ``StabAwareSelectionPolicy``:
+
+    - Same per-opp aggregation (uniform mean over the opp team).
+    - Same best-of-moves max across damaging moves; status moves
+      (``base_power == 0``) are still skipped.
+    - Each move's effective potency multiplies in ``move.base_power / 100``
+      and ``move.accuracy`` on top of STAB and type-effectiveness, mirroring
+      the order the damage calculator applies them. Symmetric on defense:
+      an opp's high-BP STAB threat hurts us proportionally more, a low-BP
+      coverage move hurts less.
+
+    Theoretical leverage over the default:
+
+    - Movepool strength: leads carrying high-BP coverage outrank leads with
+      weak filler at the same type-chart matchup. The team builder explicitly
+      ranks moves by base power (see ``teambuild._move_priority``), so this
+      finally lets selection consume that signal end-to-end.
+    - Accuracy: a 70% accuracy move expects 70% of its damage. Existing
+      policies treat a 70%-acc 130 BP STAB 2x move (effective potency 2.73)
+      identically to a 100%-acc 60 BP STAB 2x move (effective potency 1.8) --
+      a 51% damage gap the type-chart score is blind to.
+    - At the reference point (100 BP, 100% accuracy, no STAB on either side)
+      the policy collapses to ``MatchupAwareSelectionPolicy`` on the type
+      chart alone, so it's a strict refinement of the parent: same structure
+      when scalars are uniform, ranked correctly when they aren't.
+
+    Ignores ``meta`` on purpose -- this is the single-axis change vs the
+    STAB-aware/type-chart line, isolating the *damage-scalar* improvement
+    from any usage-prior, max-threat, pair-coverage, or speed-tier
+    composition. Future compounds can stack damage-estimate on top of those.
+    """
+
+    def decision(self, teams: tuple[Team, Team], max_size: int) -> SelectionCommand:
+        my_team, opp_team = teams
+        params: BattleRuleParam = self.params
+        scored = [
+            (
+                -_damage_estimate_selection_score(p, opp_team, params),
+                i,
+            )
+            for i, p in enumerate(my_team.members)
+        ]
+        scored.sort()
+        ordered = [i for _, i in scored]
+        return ordered[:max_size]
+
+
 VgcAiSelectionPolicy = MatchupAwareSelectionPolicy
 
 __all__ = [
+    "DamageEstimateSelectionPolicy",
     "MatchupAwareSelectionPolicy",
     "MetaThreatAwareSelectionPolicy",
     "MetaWeightedSelectionPolicy",
