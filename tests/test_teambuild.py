@@ -15,6 +15,7 @@ from vgc_ai.policies.teambuild import (
     MatchupTableTeamBuildPolicy,
     MetaCoverageTeamBuildPolicy,
     MetaUsageTeamBuildPolicy,
+    MinimaxMetaTeamBuildPolicy,
     MinimaxTeamBuildPolicy,
     PrincipledCoverageTeamBuildPolicy,
     VgcAiTeamBuildPolicy,
@@ -24,6 +25,7 @@ from vgc_ai.policies.teambuild import (
     _optimal_evs,
     _optimal_nature,
     _principle_bonus,
+    _solve_blended_minimax_meta_policy,
     _solve_minimax_policy,
     _species_priority,
     _species_role,
@@ -277,6 +279,99 @@ def test_minimax_team_build_picks_max_team_size_entries() -> None:
 def test_minimax_handles_empty_roster() -> None:
     policy = MinimaxTeamBuildPolicy(n_battles_per_pair=2)
     assert policy.decision([], None, MAX_TEAM_SIZE, MAX_PKM_MOVES, N_ACTIVE) == []
+
+
+def test_minimax_meta_rejects_blend_outside_unit_interval() -> None:
+    import pytest
+
+    with pytest.raises(ValueError, match="blend"):
+        MinimaxMetaTeamBuildPolicy(blend=-0.1)
+    with pytest.raises(ValueError, match="blend"):
+        MinimaxMetaTeamBuildPolicy(blend=1.1)
+
+
+def test_minimax_meta_no_meta_matches_pure_minimax_picks() -> None:
+    # With meta=None, _meta_weights returns uniform → short-circuit to the
+    # pure Nash path. Picks must match MinimaxTeamBuildPolicy exactly.
+    # Distinct seed from the default 42 so this test's matchup-table cache
+    # entry doesn't share state with other tests (the table-build sim isn't
+    # fully seeded; sharing keys would leak RNG order across test runs).
+    _, roster = _make_roster(seed=123, n_species=8)
+    base = MinimaxTeamBuildPolicy(n_battles_per_pair=2)
+    meta_policy = MinimaxMetaTeamBuildPolicy(blend=0.5, n_battles_per_pair=2)
+    base_ids = [e[0] for e in base.decision(roster, None, MAX_TEAM_SIZE, MAX_PKM_MOVES, N_ACTIVE)]
+    meta_ids = [
+        e[0] for e in meta_policy.decision(roster, None, MAX_TEAM_SIZE, MAX_PKM_MOVES, N_ACTIVE)
+    ]
+    assert base_ids == meta_ids
+
+
+def test_minimax_meta_blend_zero_matches_pure_minimax_picks_with_meta() -> None:
+    # Even with a non-uniform meta, blend=0 must reproduce pure Nash picks
+    # (short-circuited via the self._blend == 0.0 check). Guards against
+    # accidental drift if the LP coefficient construction changes.
+    move_set, roster = _make_roster(seed=124, n_species=8)
+    meta = BasicMeta(move_set, roster)
+    # Populate usage on the first few species by faking a record entry.
+    from vgc2.battle_engine.pokemon import Pokemon
+    from vgc2.battle_engine.team import Team
+
+    biased_team = Team(
+        [
+            Pokemon(roster[0], [0], 100, (85,) * 6, (31,) * 6, Nature.SERIOUS),
+            Pokemon(roster[1], [0], 100, (85,) * 6, (31,) * 6, Nature.SERIOUS),
+        ]
+    )
+    meta.add_match((biased_team, biased_team), 0, (1200, 1200))
+
+    base = MinimaxTeamBuildPolicy(n_battles_per_pair=2)
+    blend0 = MinimaxMetaTeamBuildPolicy(blend=0.0, n_battles_per_pair=2)
+    base_ids = [e[0] for e in base.decision(roster, meta, MAX_TEAM_SIZE, MAX_PKM_MOVES, N_ACTIVE)]
+    blend0_ids = [
+        e[0] for e in blend0.decision(roster, meta, MAX_TEAM_SIZE, MAX_PKM_MOVES, N_ACTIVE)
+    ]
+    assert base_ids == blend0_ids
+
+
+def test_solve_blended_returns_valid_distribution_at_extremes() -> None:
+    import numpy as np
+
+    table = np.array(
+        [
+            [0.5, 0.9, 0.9],
+            [0.1, 0.5, 0.5],
+            [0.1, 0.5, 0.5],
+        ],
+        dtype=np.float64,
+    )
+    uniform = np.array([1 / 3, 1 / 3, 1 / 3], dtype=np.float64)
+    biased = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+    for prior in (uniform, biased):
+        for blend in (0.0, 0.25, 0.5, 0.75, 1.0):
+            p = _solve_blended_minimax_meta_policy(table, prior, blend)
+            assert p.shape == (3,)
+            assert np.isclose(p.sum(), 1.0), f"blend={blend} prior={prior}: sum={p.sum()}"
+            assert (p >= 0).all(), f"blend={blend} prior={prior}: negatives in {p}"
+
+
+def test_solve_blended_full_meta_picks_meta_best_response() -> None:
+    import numpy as np
+
+    # Row 1 is best vs col 0 only (M @ q* maximized at row 1 when q*
+    # puts all mass on col 0).
+    table = np.array(
+        [
+            [0.5, 0.5, 0.5],
+            [0.9, 0.1, 0.1],
+            [0.5, 0.5, 0.5],
+        ],
+        dtype=np.float64,
+    )
+    prior = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+    p = _solve_blended_minimax_meta_policy(table, prior, blend=1.0)
+    # At blend=1.0 the LP optimizes <p, M @ q*> = p @ [0.5, 0.9, 0.5];
+    # max is row 1 → p[1] ≈ 1.
+    assert p[1] > 0.99
 
 
 def test_meta_coverage_picks_max_team_size_entries() -> None:

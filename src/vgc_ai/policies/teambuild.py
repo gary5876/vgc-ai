@@ -1,21 +1,29 @@
-"""Team build policy.
+"""Team build policies.
 
-Two builders:
+Current default: ``MinimaxTeamBuildPolicy`` (aliased as ``VgcAiTeamBuildPolicy``).
+Solves a zero-sum-game LP over the roster's singleton matchup table for a
+Nash-equilibrium mixing distribution, then deterministically picks the
+top-``max_team_size`` species by equilibrium mass. More robust than the
+prior greedy default when the roster has non-trivial rock-paper-scissors
+structure: the LP finds a portfolio that's hard to counter, where greedy
+coverage can over-commit to one branch of the matchup graph.
 
-- ``MatchupTableTeamBuildPolicy`` — current ``VgcAiTeamBuildPolicy`` default.
-  Computes a roster-x-roster 1v1 matchup table (see
-  ``vgc_ai.eval.matchup_table``) and picks species via mean-best-matchup
-  greedy: first pick is the species with the highest mean win rate against
-  the roster; subsequent picks maximize ``mean_j(max_t(M[t][j]))`` — i.e.
-  expand the set of roster species the team can collectively beat. Table
-  is cached per-roster on the policy instance.
+Other builders kept for A/B comparison and as fallbacks:
 
-- ``MetaUsageTeamBuildPolicy`` — the prior baseline (PR #12). Pure usage
-  / stat-sum rank. Cleared the championship gate vs ``RandomTeamBuildPolicy``
-  at +177 ELO. Kept for A/B comparison.
+- ``MatchupTableTeamBuildPolicy`` — mean-best-matchup greedy coverage over
+  the same matchup table. First pick is the species with the highest mean
+  win rate against the roster; subsequent picks maximize
+  ``mean_j(max_t(M[t][j]))`` — i.e. expand the set of roster species the
+  team can collectively beat.
+- ``MetaCoverageTeamBuildPolicy`` — usage-weighted generalization of the
+  greedy coverage objective; weighted max-cover (``1 - 1/e`` approx).
+- ``PrincipledCoverageTeamBuildPolicy`` — adds team-construction principle
+  bonuses (speed control, status, STAB diversity, phys/spec split, bulk).
+- ``MetaUsageTeamBuildPolicy`` — pure usage / stat-sum rank. Cleared the
+  championship gate vs ``RandomTeamBuildPolicy`` at +177 ELO (PR #12).
 
-Both builders go through ``_build_team_command``, which applies
-**per-species build tuning** to whatever species the builder picks:
+All builders share ``_build_team_command``, which applies per-species
+build tuning to whatever species the builder picks:
 
 - ``_species_role(species)``: physical if ``ATK >= SPA``, else special.
 - ``_optimal_evs``: sweeper spread ``(6 HP / 252 ATK or SPA / 252 SPE)``.
@@ -25,9 +33,13 @@ Both builders go through ``_build_team_command``, which applies
 - ``_move_priority(species, role)``: ``base_power * STAB * role_match``
   where off-category moves get a 0.7 penalty (not a hard exclusion).
 
+The matchup table (``vgc_ai.eval.matchup_table``) is cached per-roster on
+the module level, so the precompute cost (~5 s for a 30-species roster)
+is paid once and shared across builders.
+
 ``BasicMeta.usage_rate_pokemon`` raises ``ZeroDivisionError`` when called
 before any matches are recorded (epoch 0 of every championship) —
-defended in ``_species_priority``.
+defended in ``_meta_weights`` and ``_species_priority``.
 """
 
 from __future__ import annotations
@@ -347,6 +359,151 @@ class MinimaxTeamBuildPolicy(TeamBuildPolicy):  # type: ignore[misc]
         return _build_team_command(roster, picks, max_pkm_moves)
 
 
+_DEFAULT_MINIMAX_META_BLEND = 0.5
+"""Default convex-combination weight in MinimaxMetaTeamBuildPolicy.
+
+0.0 → pure Nash (identical to MinimaxTeamBuildPolicy); 1.0 → pure
+best-response to observed meta (similar to MetaCoverageTeamBuildPolicy
+but exact instead of greedy). 0.5 is the natural midpoint — it keeps
+half the Nash robustness while letting the LP exploit known opponent
+preferences. Worth A/B-ing if signal warrants."""
+
+
+def _solve_blended_minimax_meta_policy(
+    table: npt.NDArray[np.float64],
+    meta_prior: npt.NDArray[np.float64],
+    blend: float,
+) -> npt.NDArray[np.float64]:
+    """Solve ``max_p [(1-blend) v + blend <p, M q>]`` where ``q = meta_prior``.
+
+    Generalizes :func:`_solve_minimax_policy` by adding a meta-prior term
+    to the objective. When ``blend == 0`` the LP is identical to the pure
+    Nash one — caller should short-circuit via ``_solve_minimax_policy``
+    in that case to avoid the extra term construction. When ``blend == 1``
+    the Nash constraint ``v <= <p, M[:, j]>`` is still present (so ``p``
+    stays on the simplex and ``v`` is well-defined), but the objective
+    only optimizes the meta-prior term — equivalent to
+    ``max_p <p, M q>`` modulo the LP variable encoding.
+
+    Algorithm (extension of the Reis LP shape used by
+    :func:`_solve_minimax_policy`):
+
+        variables x = [v, p_0, ..., p_{n-1}]
+        let s = M @ meta_prior   (expected matchup of each species
+                                  against a meta-weighted opponent)
+        minimize  -[(1-blend) v + blend <p, s>]
+        subject to v - p^T M[:, j] <= 0   for each column j
+                   sum(p) = 1
+                   p_i >= 0,  v unbounded
+
+    Falls back to uniform on LP failure (defensive — matches the parent
+    solver's behavior).
+    """
+    from scipy.optimize import linprog
+
+    n = table.shape[0]
+    if n == 0:
+        return np.zeros(0, dtype=np.float64)
+
+    s = table @ meta_prior  # length-n vector: expected matchup vs meta opp.
+
+    c = np.zeros(n + 1, dtype=np.float64)
+    c[0] = -(1.0 - blend)  # -v coefficient (we minimize -objective).
+    c[1:] = -blend * s  # -p_i coefficients on the meta-prior term.
+
+    a_ub = np.zeros((n, n + 1), dtype=np.float64)
+    a_ub[:, 0] = 1.0
+    a_ub[:, 1:] = -table.T
+    b_ub = np.zeros(n, dtype=np.float64)
+
+    a_eq = np.zeros((1, n + 1), dtype=np.float64)
+    a_eq[0, 1:] = 1.0
+    b_eq = np.array([1.0])
+
+    bounds: list[tuple[float | None, float | None]] = [(None, None)] + [(0.0, None)] * n
+
+    result = linprog(c, A_ub=a_ub, b_ub=b_ub, A_eq=a_eq, b_eq=b_eq, bounds=bounds)
+    if not result.success:
+        return np.full(n, 1.0 / n, dtype=np.float64)
+    p: npt.NDArray[np.float64] = np.asarray(result.x[1:], dtype=np.float64)
+    p = np.clip(p, 0.0, None)
+    total = float(p.sum())
+    if total <= 0.0:
+        return np.full(n, 1.0 / n, dtype=np.float64)
+    return p / total
+
+
+class MinimaxMetaTeamBuildPolicy(MinimaxTeamBuildPolicy):
+    """LP that blends Nash robustness with best-response to observed meta.
+
+    Strict generalization of :class:`MinimaxTeamBuildPolicy`: the LP
+    objective is the convex combination
+    ``(1-blend) * v + blend * <p, M @ q*>`` where ``v`` is the Nash
+    worst-case payoff and ``q*`` is the meta usage prior (from
+    :func:`_meta_weights`). The Nash constraint ``v <= <p, M[:, j]>``
+    is preserved, so even at ``blend == 1`` the LP still picks species
+    from the simplex against the matchup table — it just stops
+    optimizing for worst-case opponents and optimizes for the
+    meta-weighted opponent instead.
+
+    Falls back to pure :class:`MinimaxTeamBuildPolicy` behavior when
+    the meta has no usable data (epoch 0 of every championship, or
+    ``BasicMeta.usage_rate_pokemon`` raises ``ZeroDivisionError``) —
+    detected by ``_meta_weights`` returning a uniform distribution,
+    which makes the blended LP equivalent to the pure-Nash LP up to
+    a constant in the objective. To keep the no-meta path
+    *exactly* bit-identical to the parent (and to skip the extra term
+    construction), we short-circuit on uniform weights.
+
+    Hypothesis under test: in a real competitive field the opponent
+    isn't fully adversarial (which is what pure Nash assumes) but also
+    isn't fully predictable by the meta (which is what
+    :class:`MetaCoverageTeamBuildPolicy` assumes). ``blend=0.5`` is a
+    middle ground; the seed-1/seed-2 ELO variance of pure-Nash and
+    pure-meta builders suggests neither extreme is right.
+    """
+
+    def __init__(
+        self,
+        blend: float = _DEFAULT_MINIMAX_META_BLEND,
+        n_battles_per_pair: int = _MATCHUP_TABLE_N_PER_PAIR,
+    ) -> None:
+        super().__init__(n_battles_per_pair=n_battles_per_pair)
+        if not 0.0 <= blend <= 1.0:
+            raise ValueError(f"blend must be in [0, 1], got {blend}")
+        self._blend = blend
+
+    def decision(
+        self,
+        roster: Roster,
+        meta: Meta | None,
+        max_team_size: int,
+        max_pkm_moves: int,
+        n_active: int,
+    ) -> TeamBuildCommand:
+        if not roster or max_team_size <= 0:
+            return []
+        table = get_or_build_matchup_table(
+            roster,
+            n_battles_per_pair=self._n_battles_per_pair,
+            max_pkm_moves=max_pkm_moves,
+        )
+        prior = _meta_weights(roster, meta)
+        # Uniform prior → blended objective is just a shifted pure-Nash
+        # objective; short-circuit to keep the no-meta path bit-identical
+        # to MinimaxTeamBuildPolicy. _meta_weights returns uniform when
+        # meta is None / epoch 0 / all-zero usage.
+        n = table.shape[0]
+        uniform = 1.0 / n if n > 0 else 0.0
+        if self._blend == 0.0 or np.allclose(prior, uniform):
+            picks = _minimax_picks(table, max_team_size)
+        else:
+            p = _solve_blended_minimax_meta_policy(table, prior, self._blend)
+            row_mean = table.mean(axis=1)
+            picks = sorted(range(n), key=lambda i: (-p[i], -row_mean[i], i))[:max_team_size]
+        return _build_team_command(roster, picks, max_pkm_moves)
+
+
 def _meta_weights(roster: Roster, meta: Meta | None) -> npt.NDArray[np.float64]:
     """Per-species opponent weights from observed meta usage.
 
@@ -640,6 +797,7 @@ __all__ = [
     "MatchupTableTeamBuildPolicy",
     "MetaCoverageTeamBuildPolicy",
     "MetaUsageTeamBuildPolicy",
+    "MinimaxMetaTeamBuildPolicy",
     "MinimaxTeamBuildPolicy",
     "PrincipledCoverageTeamBuildPolicy",
     "VgcAiTeamBuildPolicy",
