@@ -9,9 +9,21 @@ One subcommand per track:
 - ``battle`` — Per-pair duel via ``vgc_ai.eval.duel.duel``. Reads
   ``BATTLE_STRATEGIES``; battle policy is the only differentiator.
 - ``championship`` — Per-pair competitor-vs-competitor head-to-head via
-  ``vgc2.competition.match.Match``. Reads ``CHAMPIONSHIP_STRATEGIES``;
-  team-build + selection differ, battle policy is held to the project's
-  current battle default.
+  ``vgc2.competition.match.Match`` with ``gen=gen_team`` (routes to
+  ``Match._run_random``). **Does NOT call ``set_meta``** — every
+  meta-aware compound runs with empty meta on this subcommand. Kept as
+  a "no-meta baseline" and for backward compatibility with the VM bench
+  loop; prefer ``championship_real`` for actual Championship Track
+  evaluation.
+- ``championship_real`` — Two-phase Championship-based bench. Phase 1
+  registers every ``CHAMPIONSHIP_STRATEGIES`` competitor into a
+  ``vgc2.competition.ecosystem.Championship`` with a fresh ``BasicMeta``
+  and runs ``--epochs`` epochs to populate the meta (``set_meta`` IS
+  called per match via ``Match._run_non_random``). Phase 2 plays
+  default-vs-challenger pairwise matches with the warmed meta and teams
+  rebuilt against current usage data. Output schema matches the
+  ``championship`` subcommand so the reviewer / proposer / pr_auto_handler
+  consume it unchanged.
 - ``balance`` — Smoke validation: each ``DesignCompetitor`` constructs
   and exposes a legal policy. Reads ``BALANCE_STRATEGIES``. A real
   evaluator-driven bench waits on ``MetaEvaluator`` / ``RuleEvaluator``
@@ -27,6 +39,7 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import random
 import sys
 import time
 from collections.abc import Iterator
@@ -34,14 +47,18 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+from vgc2.balance.meta import BasicMeta
 from vgc2.battle_engine.constants import BattleRuleParam
+from vgc2.battle_engine.security import sanitized_team_build_decision
 from vgc2.competition import (
     Competitor,
     CompetitorManager,
     DesignCompetitor,
 )
+from vgc2.competition.ecosystem import Championship, Strategy, build_team, label_roster
 from vgc2.competition.match import Match
-from vgc2.util.generator import gen_team
+from vgc2.util.generator import gen_move_set, gen_pkm_roster, gen_team
 
 from vgc_ai.eval.duel import duel
 from vgc_ai.policies.battle import VgcAiBattlePolicy
@@ -58,6 +75,10 @@ from vgc_ai.strategies import (
 
 DEFAULT_BATTLE_N = 200
 DEFAULT_CHAMPIONSHIP_N = 50
+DEFAULT_CHAMPIONSHIP_REAL_N = 20
+DEFAULT_CHAMPIONSHIP_REAL_EPOCHS = 30
+DEFAULT_CHAMPIONSHIP_REAL_ROSTER_SIZE = 30
+DEFAULT_CHAMPIONSHIP_REAL_N_MOVES = 60
 DEFAULT_OUTPUT_DIR = Path("bench/strategies")
 
 BATTLE_HEADER = [
@@ -279,6 +300,170 @@ def run_championship_tournament(n_battles: int, output_path: Path) -> int:
     return 0
 
 
+def run_championship_real_tournament(
+    *,
+    n_battles: int,
+    output_path: Path,
+    epochs: int = DEFAULT_CHAMPIONSHIP_REAL_EPOCHS,
+    seed: int | None = None,
+    roster_size: int = DEFAULT_CHAMPIONSHIP_REAL_ROSTER_SIZE,
+    n_moves: int = DEFAULT_CHAMPIONSHIP_REAL_N_MOVES,
+    max_team_size: int = 4,
+    max_pkm_moves: int = 4,
+    n_active: int = 2,
+) -> int:
+    """Championship Track bench with REAL meta accumulation.
+
+    Two phases:
+
+    1. **Warmup**: register every ``CHAMPIONSHIP_STRATEGIES`` competitor
+       into a ``Championship`` with a fresh ``BasicMeta`` and run
+       ``epochs`` epochs. ``Match._run_non_random`` is invoked under the
+       hood, which DOES call ``set_meta`` on every selector + battle
+       agent (line 114-118 of vgc2/competition/match.py). The meta
+       accumulates real usage data across epochs.
+    2. **Pairwise**: with the warmed meta, run a fresh ``Match`` for
+       each ordered ``(default, challenger)`` pair using teams rebuilt
+       against the current meta. One CSV row per pair in the existing
+       ``CHAMPIONSHIP_HEADER`` schema so the reviewer / proposer /
+       pr_auto_handler keep working unchanged.
+
+    Why this exists: ``run_championship_tournament`` (above) uses
+    ``Match(..., gen=gen_team)`` which routes to ``Match._run_random``,
+    a code path that **never calls set_meta**. Every meta-aware compound
+    in the registry has been bench-tested with empty meta. This
+    subcommand is the structural fix; the old one is preserved for
+    backward compatibility (and as a baseline for "performance with no
+    meta").
+    """
+    _ensure_parent_and_header(output_path, CHAMPIONSHIP_HEADER)
+
+    if seed is not None:
+        np.random.seed(seed)
+        random.seed(seed)
+
+    move_set = gen_move_set(n_moves)
+    roster = gen_pkm_roster(roster_size, move_set)
+    label_roster(move_set, roster)
+    meta = BasicMeta(move_set, roster)
+
+    champ = Championship(
+        roster,
+        meta,
+        epochs=epochs,
+        n_active=n_active,
+        n_battles=n_battles,
+        max_team_size=max_team_size,
+        max_pkm_moves=max_pkm_moves,
+        strategy=Strategy.RANDOM_PAIRING,
+        client=None,
+    )
+    managers: dict[str, CompetitorManager] = {}
+    for name, strategy in CHAMPIONSHIP_STRATEGIES.items():
+        comp = _CompoundCompetitor(name, strategy)
+        cm = CompetitorManager(comp)
+        champ.register(cm)
+        managers[name] = cm
+
+    print(
+        f"  championship-real WARMUP: {len(managers)} competitors, "
+        f"epochs={epochs}, n_battles={n_battles}",
+        file=sys.stderr,
+    )
+    warmup_t0 = time.perf_counter()
+    champ.run()
+    warmup_elapsed = time.perf_counter() - warmup_t0
+    print(
+        f"  championship-real WARMUP done in {warmup_elapsed:.1f}s, "
+        f"meta has {len(meta.record)} matches recorded",
+        file=sys.stderr,
+    )
+
+    if CHAMPIONSHIP_DEFAULT not in managers:
+        print(
+            f"  championship-real: default {CHAMPIONSHIP_DEFAULT!r} not in registry, skipping pairwise phase",
+            file=sys.stderr,
+        )
+        return 0
+
+    challengers = [n for n in managers if n != CHAMPIONSHIP_DEFAULT]
+    with output_path.open("a", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        for a_name, b_name in _ordered_pairs([CHAMPIONSHIP_DEFAULT, *challengers]):
+            # Only emit rows touching the default — keeps cycle time
+            # bounded (2*(N-1) pairs instead of N*(N-1)) and matches the
+            # reviewer's gate (strategy_a == cand AND strategy_b == default).
+            if CHAMPIONSHIP_DEFAULT not in (a_name, b_name):
+                continue
+            cm_a, cm_b = managers[a_name], managers[b_name]
+            # Rebuild teams against the warmed meta so each pair's
+            # decision reflects current usage data, not the team frozen
+            # at championship epoch ``epochs-1``.
+            cm_a.team = build_team(
+                sanitized_team_build_decision(
+                    cm_a.competitor.teambuildpolicy,
+                    roster,
+                    meta,
+                    max_team_size,
+                    max_pkm_moves,
+                    n_active,
+                ),
+                roster,
+            )
+            cm_b.team = build_team(
+                sanitized_team_build_decision(
+                    cm_b.competitor.teambuildpolicy,
+                    roster,
+                    meta,
+                    max_team_size,
+                    max_pkm_moves,
+                    n_active,
+                ),
+                roster,
+            )
+            match = Match(
+                (cm_a, cm_b),
+                n_active=n_active,
+                n_battles=max(1, n_battles // 2),
+                max_team_size=max_team_size,
+                max_pkm_moves=max_pkm_moves,
+                meta=meta,
+                params=BattleRuleParam(),
+            )
+            t0 = time.perf_counter()
+            match.run()
+            elapsed = time.perf_counter() - t0
+            wins_a, wins_b = match.wins
+            total = wins_a + wins_b
+            ci_low, ci_high = wilson_ci_95(wins_a, total) if total else (0.0, 0.0)
+            win_rate_a = wins_a / total if total else 0.0
+            w.writerow(
+                [
+                    _now(),
+                    "championship",
+                    a_name,
+                    b_name,
+                    total,
+                    wins_a,
+                    wins_b,
+                    round(win_rate_a, 4),
+                    round(ci_low, 4),
+                    round(ci_high, 4),
+                    round(elapsed, 3),
+                    int(a_name == CHAMPIONSHIP_DEFAULT),
+                    int(b_name == CHAMPIONSHIP_DEFAULT),
+                ]
+            )
+            f.flush()
+            print(
+                f"  championship-real: {a_name} vs {b_name}: "
+                f"{wins_a}-{wins_b} "
+                f"(wr={win_rate_a:.1%}, ci95=[{ci_low:.3f},{ci_high:.3f}])",
+                file=sys.stderr,
+            )
+    return 0
+
+
 class _BalanceDesignCompetitor(DesignCompetitor):  # type: ignore[misc]
     def __init__(self, name: str, strategy: BalanceStrategy) -> None:
         self._name = name
@@ -346,9 +531,22 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("--n", type=int, default=DEFAULT_BATTLE_N)
     b.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_DIR / "battle.csv")
 
-    c = sub.add_parser("championship", help="Championship Track all-vs-all Match")
+    c = sub.add_parser(
+        "championship", help="Championship Track all-vs-all Match (no meta — see championship_real)"
+    )
     c.add_argument("--n", type=int, default=DEFAULT_CHAMPIONSHIP_N)
     c.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_DIR / "championship.csv")
+
+    cr = sub.add_parser(
+        "championship_real",
+        help="Championship Track with REAL meta accumulation (Championship-based, calls set_meta)",
+    )
+    cr.add_argument("--n", type=int, default=DEFAULT_CHAMPIONSHIP_REAL_N)
+    cr.add_argument("--epochs", type=int, default=DEFAULT_CHAMPIONSHIP_REAL_EPOCHS)
+    cr.add_argument("--seed", type=int, default=None)
+    cr.add_argument("--roster-size", type=int, default=DEFAULT_CHAMPIONSHIP_REAL_ROSTER_SIZE)
+    cr.add_argument("--n-moves", type=int, default=DEFAULT_CHAMPIONSHIP_REAL_N_MOVES)
+    cr.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_DIR / "championship.csv")
 
     bal = sub.add_parser("balance", help="Balance Track construction smoke")
     bal.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_DIR / "balance.csv")
@@ -358,6 +556,15 @@ def main(argv: list[str] | None = None) -> int:
         return run_battle_tournament(args.n, args.output)
     if args.track == "championship":
         return run_championship_tournament(args.n, args.output)
+    if args.track == "championship_real":
+        return run_championship_real_tournament(
+            n_battles=args.n,
+            output_path=args.output,
+            epochs=args.epochs,
+            seed=args.seed,
+            roster_size=args.roster_size,
+            n_moves=args.n_moves,
+        )
     if args.track == "balance":
         return run_balance_smoke(args.output)
     p.print_help()
