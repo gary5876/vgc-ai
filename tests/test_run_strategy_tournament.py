@@ -130,6 +130,76 @@ def test_championship_tournament_writes_one_row_per_pair(
         assert 0.0 <= ci_lo <= ci_hi <= 1.0
 
 
+def test_championship_real_writes_default_vs_challenger_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Two strategies, default plus one challenger. Phase 1 (warmup) runs
+    # 2 epochs of Championship; Phase 2 emits the (default, challenger)
+    # and (challenger, default) rows. Small roster/moves keep the smoke
+    # bounded; this test exists to verify the wiring (set_meta is called,
+    # CSV format is right, rows are emitted) — not to measure win rates.
+    tiny = {
+        k: CHAMPIONSHIP_STRATEGIES[k]
+        for k in ("minimax+meta_threat_aware_selection", "random+random")
+    }
+    monkeypatch.setattr(mod, "CHAMPIONSHIP_STRATEGIES", tiny)
+    monkeypatch.setattr(mod, "CHAMPIONSHIP_DEFAULT", "minimax+meta_threat_aware_selection")
+
+    output_path = tmp_path / "championship.csv"
+    rc = mod.run_championship_real_tournament(
+        n_battles=2,
+        output_path=output_path,
+        epochs=2,
+        seed=42,
+        roster_size=8,
+        n_moves=16,
+    )
+    assert rc == 0
+
+    with output_path.open() as f:
+        rows = list(csv.DictReader(f))
+    assert len(rows) == 2  # default vs challenger in both orderings
+    pair_set = {(r["strategy_a"], r["strategy_b"]) for r in rows}
+    assert pair_set == {
+        ("minimax+meta_threat_aware_selection", "random+random"),
+        ("random+random", "minimax+meta_threat_aware_selection"),
+    }
+    for r in rows:
+        assert r["track"] == "championship"
+        # Wilson bounds are well-formed.
+        ci_lo = float(r["ci95_low"])
+        ci_hi = float(r["ci95_high"])
+        assert 0.0 <= ci_lo <= ci_hi <= 1.0
+        # Exactly one side of each row is flagged as default.
+        assert {r["is_default_a"], r["is_default_b"]} == {"0", "1"}
+
+
+def test_championship_real_skips_pairwise_when_default_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # If the configured default isn't in the (shrunk) registry, phase 2
+    # is a no-op — but warmup still runs and exits cleanly.
+    tiny = {k: CHAMPIONSHIP_STRATEGIES[k] for k in ("metausage+matchup_aware", "random+random")}
+    monkeypatch.setattr(mod, "CHAMPIONSHIP_STRATEGIES", tiny)
+    monkeypatch.setattr(mod, "CHAMPIONSHIP_DEFAULT", "not_in_registry")
+
+    output_path = tmp_path / "championship.csv"
+    rc = mod.run_championship_real_tournament(
+        n_battles=2,
+        output_path=output_path,
+        epochs=2,
+        seed=42,
+        roster_size=8,
+        n_moves=16,
+    )
+    assert rc == 0
+    # File may contain just the header (if it was newly created) or nothing
+    # appended beyond it.
+    with output_path.open() as f:
+        rows = list(csv.DictReader(f))
+    assert rows == []
+
+
 def test_balance_smoke_writes_one_row_per_strategy(tmp_path: Path) -> None:
     output_path = tmp_path / "balance.csv"
     rc = mod.run_balance_smoke(output_path)
