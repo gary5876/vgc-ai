@@ -9,8 +9,12 @@
 #   1. git pull            — picks up auto-merged PRs from the reviewer loop
 #   2. uv sync             — installs / refreshes deps
 #   3. bench.run_continuous — per-policy continuous metric (legacy schema)
-#   4. bench.run_strategy_tournament battle|championship|balance
-#                          — strategy-level metric the reviewer reads
+#   4. bench.run_strategy_tournament battle|championship_real|balance
+#                          — strategy-level metric the reviewer reads.
+#                            championship_real (not championship) is used
+#                            because the latter routes to Match._run_random
+#                            and never calls set_meta — every meta-aware
+#                            compound would be tested with empty meta.
 #
 # Logs to ~/vgc-ai-logs/bench/round-<TS>.log per cycle.
 #
@@ -42,8 +46,8 @@ while true; do
         uv run python -m bench.run_continuous --n "${CONTINUOUS_N}" || true
         echo "--- run_strategy_tournament battle (n=${BATTLE_N}) ---"
         uv run python -m bench.run_strategy_tournament battle --n "${BATTLE_N}" || true
-        echo "--- run_strategy_tournament championship (n=${CHAMPIONSHIP_N}) ---"
-        uv run python -m bench.run_strategy_tournament championship --n "${CHAMPIONSHIP_N}" || true
+        echo "--- run_strategy_tournament championship_real (n=${CHAMPIONSHIP_N}) ---"
+        uv run python -m bench.run_strategy_tournament championship_real --n "${CHAMPIONSHIP_N}" || true
         echo "--- run_strategy_tournament balance ---"
         uv run python -m bench.run_strategy_tournament balance || true
         echo "=== done ${ts} ==="
