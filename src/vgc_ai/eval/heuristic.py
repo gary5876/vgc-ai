@@ -19,6 +19,12 @@ Weights are intentional and reflect the dominant signals in vgc2 doubles:
   Without this, the eval is indifferent to keeping the bench healthy vs
   the frontline. The frontline is what attacks next turn, so a small
   bias toward it improves switch decisions.
+- ``USAGE_ALPHA`` (1.0): coefficient on the meta-usage-aware HP weight.
+  When the caller passes a ``usage_weights`` dict, each Pokemon's HP
+  contribution is multiplied by ``1 + USAGE_ALPHA * usage[species_id]``.
+  A 30%-usage species counts 1.3x; a 0%-usage species counts 1.0x.
+  Multiplicative so the no-meta path and the no-data-for-this-species
+  path are both bit-identical to the prior uniform behavior.
 """
 
 from __future__ import annotations
@@ -33,6 +39,7 @@ HP_WEIGHT = 1.0
 FAINT_WEIGHT = 3.0
 MATCHUP_WEIGHT = 0.5
 ACTIVE_HP_WEIGHT = 0.5
+USAGE_ALPHA = 1.0
 
 
 def _hp_ratio(pkm: BattlingPokemon) -> float:
@@ -40,8 +47,23 @@ def _hp_ratio(pkm: BattlingPokemon) -> float:
     return pkm.hp / max_hp if max_hp > 0 else 0.0
 
 
-def _team_hp_sum(team: BattlingTeam) -> float:
-    return sum(_hp_ratio(p) for p in team.active + team.reserve)
+def _hp_weight(pkm: BattlingPokemon, usage_weights: dict[int, float] | None) -> float:
+    """Meta-usage multiplier on a Pokemon's HP contribution.
+
+    Returns ``1.0`` when ``usage_weights`` is ``None`` or the species is
+    absent from the dict (epoch 0 / species never recorded). Otherwise
+    ``1 + USAGE_ALPHA * usage_rate``, so high-usage species count more
+    than rare ones. Multiplicative on the existing per-Pokemon weight
+    of 1, so the no-meta call site is bit-identical to the prior code.
+    """
+    if usage_weights is None:
+        return 1.0
+    u = usage_weights.get(pkm.constants.species.id, 0.0)
+    return 1.0 + USAGE_ALPHA * u
+
+
+def _team_hp_sum(team: BattlingTeam, usage_weights: dict[int, float] | None = None) -> float:
+    return sum(_hp_ratio(p) * _hp_weight(p, usage_weights) for p in team.active + team.reserve)
 
 
 def _team_fainted_count(team: BattlingTeam) -> int:
@@ -89,12 +111,26 @@ def _active_hp_mean(team: BattlingTeam) -> float:
     return sum(_hp_ratio(p) for p in team.active) / len(team.active)
 
 
-def evaluate(state: State, params: BattleRuleParam | None = None) -> float:
-    """Score the state from side 0's perspective. Higher is better for side 0."""
+def evaluate(
+    state: State,
+    params: BattleRuleParam | None = None,
+    *,
+    usage_weights: dict[int, float] | None = None,
+) -> float:
+    """Score the state from side 0's perspective. Higher is better for side 0.
+
+    When ``usage_weights`` is provided (Championship Track meta plumbing in
+    ``HeuristicDetBattlePolicy.set_meta``), per-Pokemon HP contributions on
+    both sides are scaled by ``1 + USAGE_ALPHA * usage_rate[species_id]``.
+    Symmetric application preserves the comparative-payoff structure: a
+    high-usage species is worth more whether on our side (defend it) or
+    on opp's side (target it). Pass ``None`` (default) for the prior
+    uniform behavior — that path is bit-identical to the pre-meta eval.
+    """
     p = params or BattleRuleParam()
     t0, t1 = state.sides[0].team, state.sides[1].team
 
-    hp_diff = _team_hp_sum(t0) - _team_hp_sum(t1)
+    hp_diff = _team_hp_sum(t0, usage_weights) - _team_hp_sum(t1, usage_weights)
     faint_diff = _team_fainted_count(t1) - _team_fainted_count(t0)
     matchup_diff = _matchup_score(p, t0.active, t1.active) - _matchup_score(p, t1.active, t0.active)
     active_hp_diff = _active_hp_mean(t0) - _active_hp_mean(t1)
