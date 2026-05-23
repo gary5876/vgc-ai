@@ -323,7 +323,7 @@ CHAMPIONSHIP_STRATEGIES: dict[str, ChampionshipStrategy] = {
     )
 }
 
-CHAMPIONSHIP_DEFAULT = "minimax+speed_tier_selection"
+CHAMPIONSHIP_DEFAULT = "metausage+matchup_aware"
 
 
 BALANCE_STRATEGIES: dict[str, BalanceStrategy] = {
