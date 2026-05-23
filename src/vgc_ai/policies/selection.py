@@ -1024,11 +1024,133 @@ class DamageThreatSelectionPolicy(MatchupAwareSelectionPolicy):
         return ordered[:max_size]
 
 
+def _meta_damage_threat_score(
+    my_pkm: Pokemon,
+    opp_team: Team,
+    weights: list[float],
+    params: BattleRuleParam,
+) -> float:
+    """Usage-weighted damage-aware offense minus worst-case damage threat.
+
+    Composes two single-axis enhancements over ``DamageThreatSelectionPolicy``:
+
+    - offense term: ``sum_j w_j * _best_damage_potential(my, opp_j)`` -- the
+      same usage-weighted offense aggregation that
+      ``MetaWeightedSelectionPolicy`` uses, but applied to the damage-aware
+      primitive ``base_power * STAB * type_eff / _BP_NORMALIZER`` instead of
+      the type-chart multiplier. High-usage opp species drive the offense
+      signal more than rare ones, AND a 110-BP STAB SE hit no longer ties a
+      40-BP STAB SE hit.
+    - defense term: ``max_j _best_damage_potential(opp_j, my)`` -- worst-case
+      damage threat across the opp team. The max isn't usage-weighted on
+      purpose: a high-BP super-effective threat that one-shots the lead
+      removes the lead regardless of how often the species is actually
+      played -- damage doesn't get diluted by usage probability once the
+      species is on the field.
+
+    ``weights`` must already sum to 1; computed once per ``decision`` call
+    by ``_opp_usage_weights``. Returns 0.0 on an empty opp team (matches
+    every other scorer's degenerate case so stable index tiebreak applies).
+    """
+    if not opp_team.members:
+        return 0.0
+    weighted_offense = 0.0
+    max_defense = 0.0
+    for opp, w in zip(opp_team.members, weights, strict=True):
+        weighted_offense += w * _best_damage_potential(my_pkm, opp, params)
+        threat = _best_damage_potential(opp, my_pkm, params)
+        if threat > max_defense:
+            max_defense = threat
+    return weighted_offense - max_defense
+
+
+class MetaDamageThreatSelectionPolicy(MetaThreatAwareSelectionPolicy):
+    """Meta-weighted damage-aware offense minus worst-case damage threat.
+
+    Composes the two strongest single-axis selection improvements that act on
+    the per-opp scalar score (no pair aggregation, no speed term) into one
+    singleton scorer:
+
+    - From ``MetaWeightedSelectionPolicy``: usage-weighted opponent
+      aggregation for the offense term, so a 50%-usage staple drives the
+      score more than a 5%-usage curiosity at the same team slot.
+    - From ``DamageThreatSelectionPolicy``: replaces the type-chart
+      multiplier with the damage-aware primitive
+      ``base_power * STAB * type_eff / _BP_NORMALIZER`` so a 40-BP STAB
+      2x-SE hit no longer ties a 110-BP STAB 2x-SE hit. Defense is the
+      worst-case (max) damage threat -- a single high-BP SE move one-shots
+      the lead in doubles, so worst-case survival dominates average
+      threat (same argument as ``MetaThreatAwareSelectionPolicy``).
+
+    Strict refinement of ``MetaThreatAwareSelectionPolicy`` (the current
+    default's selection layer): same usage-weighted-offense / max-threat
+    shape, just with the damage-aware primitive in place of the type-chart
+    multiplier. Both refinements operate on the same axis the team builder
+    optimises for (``_move_priority`` already prefers high-BP STAB moves),
+    so leads with stronger move kits get promoted under selection too --
+    coherent across the stack.
+
+    Falls back to ``_damage_threat_score`` (uniform mean offense - max
+    threat, both damage-aware) whenever the meta is absent or has no
+    usable data yet (epoch 0, ``ZeroDivisionError`` from
+    ``BasicMeta.usage_rate_pokemon``, or all-zero weights). So the worst
+    case at epoch 0 is the proven damage-threat baseline, never a
+    regression to the type-chart parent.
+
+    Theoretical leverage over each parent in turn:
+
+    - vs ``MetaThreatAwareSelectionPolicy``: the damage primitive
+      distinguishes a 40-BP and a 110-BP super-effective move where the
+      type-chart proxy ties them at 2.0 each. In doubles, raw damage
+      output is the lever that decides whether a hit OHKOs or leaves the
+      target alive to retaliate, so promoting the high-BP lead is the
+      direct improvement.
+    - vs ``DamageThreatSelectionPolicy``: usage-weighting biases offense
+      toward counters of actually-played species. The uniform mean
+      treats a 90%-usage staple identically to a 10%-usage curiosity
+      sharing the same opp team slot; the meta-weighted variant lets
+      the offense signal reflect which opp species the opponent is
+      actually likely to field.
+
+    Ignores pair-aggregation and speed-tier on purpose -- this isolates
+    the meta + damage composition from those other axes, so the bench
+    can attribute any win to that composition specifically. Future
+    compounds can stack pair-coverage or speed-tier on top of this
+    primitive.
+    """
+
+    def decision(self, teams: tuple[Team, Team], max_size: int) -> SelectionCommand:
+        my_team, opp_team = teams
+        weights = _opp_usage_weights(self._meta, opp_team)
+        params: BattleRuleParam = self.params
+        if weights is None:
+            scored_fb = [
+                (
+                    -_damage_threat_score(p, opp_team, params),
+                    i,
+                )
+                for i, p in enumerate(my_team.members)
+            ]
+            scored_fb.sort()
+            return [i for _, i in scored_fb][:max_size]
+        scored = [
+            (
+                -_meta_damage_threat_score(p, opp_team, weights, params),
+                i,
+            )
+            for i, p in enumerate(my_team.members)
+        ]
+        scored.sort()
+        ordered = [i for _, i in scored]
+        return ordered[:max_size]
+
+
 VgcAiSelectionPolicy = MatchupAwareSelectionPolicy
 
 __all__ = [
     "DamageThreatSelectionPolicy",
     "MatchupAwareSelectionPolicy",
+    "MetaDamageThreatSelectionPolicy",
     "MetaThreatAwareSelectionPolicy",
     "MetaThreatPairCoverageSelectionPolicy",
     "MetaWeightedSelectionPolicy",
