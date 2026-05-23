@@ -35,6 +35,7 @@ from vgc_ai.policies.rule_balance import DefaultRuleBalancePolicy
 from vgc_ai.policies.selection import (
     DamageThreatSelectionPolicy,
     MatchupAwareSelectionPolicy,
+    MetaDamageThreatSelectionPolicy,
     MetaThreatAwareSelectionPolicy,
     MetaThreatPairCoverageSelectionPolicy,
     MetaWeightedSelectionPolicy,
@@ -292,6 +293,32 @@ CHAMPIONSHIP_STRATEGIES: dict[str, ChampionshipStrategy] = {
             name="minimax_meta+meta_threat_aware_selection",
             team_build_policy=MinimaxMetaTeamBuildPolicy,
             selection_policy=MetaThreatAwareSelectionPolicy,
+        ),
+        # Composes the meta-usage prior with the damage-aware primitive
+        # over the same LP-minimax team builder. Strict refinement of
+        # MetaThreatAwareSelectionPolicy (the current default's selection
+        # layer for the meta_threat_aware compounds): same usage-weighted-
+        # offense / max-threat shape, but the type-chart multiplier is
+        # replaced with ``base_power * STAB * type_eff / _BP_NORMALIZER``
+        # so a 40-BP STAB 2x-SE hit no longer ties a 110-BP STAB 2x-SE
+        # hit. Also a strict refinement of DamageThreatSelectionPolicy:
+        # the uniform mean offense becomes a usage-weighted mean once the
+        # championship meta is populated. Falls back to
+        # ``_damage_threat_score`` (uniform mean offense - max threat,
+        # both damage-aware) whenever the meta is absent or has no
+        # usable data yet (epoch 0), so the worst case at epoch 0 is the
+        # proven damage-threat baseline, never a regression to the
+        # type-chart parent. Theoretical leverage: in doubles a high-BP
+        # SE move OHKOs where a low-BP SE move merely chips, AND the
+        # opponent is more likely to actually field high-usage species,
+        # so promoting leads that hit hard against those staples
+        # compounds both signals on the same axis the team builder
+        # already optimises for (``_move_priority`` prefers high-BP
+        # STAB).
+        ChampionshipStrategy(
+            name="minimax+meta_damage_threat_selection",
+            team_build_policy=MinimaxTeamBuildPolicy,
+            selection_policy=MetaDamageThreatSelectionPolicy,
         ),
     )
 }
