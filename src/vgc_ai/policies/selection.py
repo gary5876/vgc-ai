@@ -1145,6 +1145,120 @@ class MetaDamageThreatSelectionPolicy(MetaThreatAwareSelectionPolicy):
         return ordered[:max_size]
 
 
+def _speed_damage_threat_score(
+    my_pkm: Pokemon,
+    opp_team: Team,
+    params: BattleRuleParam,
+    initiative_bonus: float = _INITIATIVE_BONUS,
+) -> float:
+    """Damage-aware mean offense minus worst-case damage threat, plus per-opp speed initiative.
+
+    Composes two single-axis enhancements over ``DamageThreatSelectionPolicy``:
+
+    - Damage-aware primitive on both offense and defense terms (already in
+      ``_damage_threat_score``): ``_best_damage_potential`` replaces the
+      type-chart multiplier so a 110-BP STAB 2x-SE hit no longer ties a
+      40-BP STAB 2x-SE hit on either side of the score.
+    - Per-opp speed-tier initiative (already in ``_speed_tier_score``):
+      +``initiative_bonus`` when our lead outspeeds the opp,
+      -``initiative_bonus`` when slower, 0.0 on a tie. The initiative
+      term is averaged over the opp team (consistent with the mean-offense
+      aggregation -- both are uniform over the unknown opponent-selection
+      draw) and is NOT added to the max-threat defense term: once an
+      out-speeding super-effective opp is on the field, it still strikes
+      first regardless of our matchup against the *rest* of the opp team,
+      so the worst-case shape stays intact.
+
+    Returns 0.0 on an empty opp team -- matches every other scorer's
+    degenerate case so stable index tiebreak applies in the caller.
+    """
+    if not opp_team.members:
+        return 0.0
+    my_speed = my_pkm.stats[Stat.SPEED]
+    offense_total = 0.0
+    initiative_total = 0.0
+    max_defense = 0.0
+    for opp in opp_team.members:
+        offense_total += _best_damage_potential(my_pkm, opp, params)
+        threat = _best_damage_potential(opp, my_pkm, params)
+        if threat > max_defense:
+            max_defense = threat
+        opp_speed = opp.stats[Stat.SPEED]
+        if my_speed > opp_speed:
+            initiative_total += initiative_bonus
+        elif my_speed < opp_speed:
+            initiative_total -= initiative_bonus
+    n = len(opp_team.members)
+    return (offense_total + initiative_total) / n - max_defense
+
+
+class SpeedDamageThreatSelectionPolicy(DamageThreatSelectionPolicy):
+    """Damage-aware mean-offense / max-threat scorer plus per-opp speed initiative.
+
+    Composes the two strongest single-axis selection improvements that act on
+    the singleton scorer without invoking the meta or pair-aggregation axes:
+
+    - From ``DamageThreatSelectionPolicy``: replaces the type-chart
+      multiplier with the damage-aware primitive
+      ``base_power * STAB * type_eff / _BP_NORMALIZER`` on both offense and
+      threat terms. A 110-BP STAB super-effective hit no longer ties a
+      40-BP STAB super-effective hit; a one-shot threat costs the full
+      damage value at the worst-case max, not its 1/N share of a mean.
+    - From ``SpeedTierAwareSelectionPolicy``: per-opp +/-``_INITIATIVE_BONUS``
+      based on ``Pokemon.stats[Stat.SPEED]``. Captures the doubles reality
+      that a faster lead may KO a key threat before being hit, mitigating
+      an incoming attack the static damage-threat term would otherwise
+      treat as inevitable. Stat is the post-EV/IV/nature value so the
+      team-build's JOLLY/TIMID + 252 SPE spread choices flow through.
+
+    Strict refinement of ``DamageThreatSelectionPolicy``: with all speeds
+    tied the initiative term is zero everywhere and the policy reduces to
+    the damage-threat parent. Same per-opp speed bonus shape as
+    ``SpeedTierAwareSelectionPolicy``, just on a damage-aware backbone
+    instead of the type-chart proxy.
+
+    Theoretical leverage over each parent:
+
+    - vs ``DamageThreatSelectionPolicy``: two leads with identical damage
+      potential against an opp duo (same best move, same STAB / type
+      coverage) can have very different practical threat exposure
+      depending on speed tier. The damage-threat scorer ranks them
+      identically; this scorer breaks the tie toward the lead that
+      strikes first.
+    - vs ``SpeedTierAwareSelectionPolicy`` (the current default's
+      selection layer): a 110-BP STAB 2x-SE lead beats a 40-BP STAB 2x-SE
+      lead under this scorer where the type-chart proxy ties them at 2.0
+      offense. In doubles the high-BP lead is more likely to OHKO before
+      being hit, so promoting it captures damage that the type-chart
+      scorer collapses to a flat multiplier.
+    - vs the current default compound (``minimax+speed_tier_selection``):
+      same team builder, same speed-tier signal -- only difference is the
+      damage-aware primitive. The team builder's ``_move_priority`` already
+      prefers high-BP STAB moves, so the selection layer's preference for
+      hard-hitting leads becomes coherent with the build axis.
+
+    Ignores ``meta`` on purpose -- this isolates the damage + speed
+    composition from the usage-prior axis. The minimax team builder is
+    fully meta-agnostic anyway, so the entire compound stays meta-free
+    and benches deterministically across epochs. Future compounds can
+    stack meta-weighting on top.
+    """
+
+    def decision(self, teams: tuple[Team, Team], max_size: int) -> SelectionCommand:
+        my_team, opp_team = teams
+        params: BattleRuleParam = self.params
+        scored = [
+            (
+                -_speed_damage_threat_score(p, opp_team, params),
+                i,
+            )
+            for i, p in enumerate(my_team.members)
+        ]
+        scored.sort()
+        ordered = [i for _, i in scored]
+        return ordered[:max_size]
+
+
 VgcAiSelectionPolicy = MatchupAwareSelectionPolicy
 
 __all__ = [
@@ -1155,6 +1269,7 @@ __all__ = [
     "MetaThreatPairCoverageSelectionPolicy",
     "MetaWeightedSelectionPolicy",
     "PairCoverageSelectionPolicy",
+    "SpeedDamageThreatSelectionPolicy",
     "SpeedPairCoverageSelectionPolicy",
     "SpeedTierAwareSelectionPolicy",
     "VgcAiSelectionPolicy",

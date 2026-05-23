@@ -40,6 +40,7 @@ from vgc_ai.policies.selection import (
     MetaThreatPairCoverageSelectionPolicy,
     MetaWeightedSelectionPolicy,
     PairCoverageSelectionPolicy,
+    SpeedDamageThreatSelectionPolicy,
     SpeedPairCoverageSelectionPolicy,
     SpeedTierAwareSelectionPolicy,
 )
@@ -275,6 +276,27 @@ CHAMPIONSHIP_STRATEGIES: dict[str, ChampionshipStrategy] = {
             name="minimax+damage_threat_selection",
             team_build_policy=MinimaxTeamBuildPolicy,
             selection_policy=DamageThreatSelectionPolicy,
+        ),
+        # Composes the two strongest single-axis selection improvements that
+        # act on the singleton scorer: the damage-aware primitive
+        # (base_power * STAB * type_eff / _BP_NORMALIZER) from
+        # DamageThreatSelectionPolicy (93.3 pct pooled vs the current
+        # default) AND the per-opp speed-tier initiative bonus from
+        # SpeedTierAwareSelectionPolicy (the current default's selection
+        # layer itself). Strict refinement of DamageThreatSelectionPolicy:
+        # recovers the parent when all speeds tie. Same per-opp speed bonus
+        # shape as the current default's selection layer, just on a
+        # damage-aware backbone instead of the type-chart proxy -- a 110-BP
+        # STAB SE lead now outranks a 40-BP STAB SE lead instead of tying
+        # at the same flat type multiplier. Same LP-minimax team builder
+        # so the bench delta isolates the selection composition.
+        # Meta-agnostic on purpose: the team builder ignores meta and so
+        # does this scorer, keeping the compound deterministic across
+        # epochs.
+        ChampionshipStrategy(
+            name="minimax+speed_damage_threat_selection",
+            team_build_policy=MinimaxTeamBuildPolicy,
+            selection_policy=SpeedDamageThreatSelectionPolicy,
         ),
         # Team builder is MinimaxMeta — same LP shape as the current
         # default's builder, but the objective is the convex combination
