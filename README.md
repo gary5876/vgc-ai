@@ -14,6 +14,17 @@ The IEEE VGC AI Competition runs on [`pokemon-vgc-engine`](https://gitlab.com/Dr
 
 This project will submit entries to all three.
 
+## Results
+
+**2026-05-17 — Class competition** (25 entrants, 50-league round-robin, net wins shown):
+
+| Track          | Rank   | Net W−L | Class #1 (for reference)   |
+|----------------|--------|---------|----------------------------|
+| Championship   | **1**  | +718    | (us)                       |
+| Battle         | 12     | +146    | +732                       |
+
+Internal class result, not the IEEE contest. The Championship win came from team-build quality; the Battle policy (still `GreedyBattlePolicy`) is the obvious next target.
+
 ## Approach
 
 Classical search, not deep RL. The 2024 3rd-place submission ([AurelianTactics writeup](https://medium.com/@aureliantactics/vgc-ai-competition-2024-edition-3rd-place-submission-5420d2f6aafe)) demonstrated that the engine's variance breaks deep RL and that tabular Monte Carlo / search beats it. Plan:
