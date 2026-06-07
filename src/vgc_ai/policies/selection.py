@@ -76,6 +76,18 @@ lead in the pair contributes independently to the initiative term per
 opp, matching the doubles reality that both leads attack and defend
 every turn. Strict refinement of the pair-coverage parent: recovers
 the parent when all speeds tie.
+
+``BulkAwareDamageThreatSelectionPolicy`` refines the damage-aware
+primitive of ``DamageThreatSelectionPolicy`` along the *bulk* axis: the
+BP-only scorer treats every defender as if it had identical HP / DEF /
+SPD, so a 110-BP STAB super-effective hit ranks the same against a
+frail support and a defensive tank. The vgc2 damage formula is linear
+in ``(attacker_offense_stat / defender_defense_stat)`` and the final
+HP determines how many such hits the defender survives, so normalising
+``BP * STAB * type_eff * (atk / def_)`` by ``defender_max_hp`` turns
+the damage proxy into a real KO-likelihood signal. Mean over opp HP
+for offense, max over opp HP for defense -- same shape as the
+damage-threat parent, just on the per-HP scale.
 """
 
 from __future__ import annotations
@@ -84,7 +96,7 @@ from vgc2.agent import SelectionCommand, SelectionPolicy
 from vgc2.balance.meta import Meta
 from vgc2.battle_engine import BattleRuleParam
 from vgc2.battle_engine.damage_calculator import type_effectiveness_modifier
-from vgc2.battle_engine.modifiers import Stat
+from vgc2.battle_engine.modifiers import Category, Stat
 from vgc2.battle_engine.pokemon import Pokemon
 from vgc2.battle_engine.team import Team
 
@@ -1259,9 +1271,170 @@ class SpeedDamageThreatSelectionPolicy(DamageThreatSelectionPolicy):
         return ordered[:max_size]
 
 
+def _best_effective_damage(attacker: Pokemon, defender: Pokemon, params: BattleRuleParam) -> float:
+    r"""Best BP * STAB * type_eff * (atk/def) / max_hp over damaging moves.
+
+    Bulk-aware refinement of ``_best_damage_potential``. The vgc2 damage
+    formula (see ``damage_calculator.calculate_damage``) is linear in
+    ``base_power`` AND in ``attacking_stats[atk] / defending_stats[def]``,
+    and the practical question is "what fraction of the defender's HP does
+    the hit remove" -- not raw damage in absolute units. Dividing by
+    ``defender.stats[Stat.MAX_HP]`` turns the per-move scalar into a
+    KO-likelihood proxy directly comparable across defenders with very
+    different bulk profiles.
+
+    Picks the attack/defense stat pair from the move's category --
+    PHYSICAL uses ``ATTACK / DEFENSE``, SPECIAL uses
+    ``SPECIAL_ATTACK / SPECIAL_DEFENSE`` -- mirroring the engine's
+    branch in ``calculate_damage``. STAB and type effectiveness
+    multiply on top, exactly as in the engine's modifier composition.
+
+    Returns 0.0 if the attacker has no damaging moves (status-only kit)
+    or the defender's max HP is non-positive (defensive guard against
+    malformed Pokemon -- ``calculate_stats`` always floors HP at
+    ``level + 10`` so this branch is unreachable for any legally-
+    generated team, but the guard keeps the scorer robust). Skips moves
+    with ``move.category == Category.OTHER`` (status-class damaging
+    moves return 0 from the engine) and moves with zero defense stat.
+    """
+    max_hp = defender.stats[Stat.MAX_HP]
+    if max_hp <= 0:
+        return 0.0
+    best = 0.0
+    attacker_types = set(attacker.species.types)
+    for move in attacker.moves:
+        if move.base_power == 0:
+            continue
+        if move.category == Category.PHYSICAL:
+            atk = attacker.stats[Stat.ATTACK]
+            def_ = defender.stats[Stat.DEFENSE]
+        elif move.category == Category.SPECIAL:
+            atk = attacker.stats[Stat.SPECIAL_ATTACK]
+            def_ = defender.stats[Stat.SPECIAL_DEFENSE]
+        else:
+            continue
+        if def_ <= 0:
+            continue
+        stab = 1.5 if move.pkm_type in attacker_types else 1.0
+        eff = type_effectiveness_modifier(params, move.pkm_type, defender.species.types)
+        dmg = float(move.base_power) * stab * eff * (float(atk) / float(def_))
+        if dmg > best:
+            best = dmg
+    return best / float(max_hp)
+
+
+def _bulk_aware_damage_threat_score(
+    my_pkm: Pokemon, opp_team: Team, params: BattleRuleParam
+) -> float:
+    """Mean per-opp-HP offense minus worst-case per-my-HP threat.
+
+    Same aggregation shape as ``_damage_threat_score`` (uniform mean
+    offense, max defense) -- the structural improvement is in the
+    underlying primitive ``_best_effective_damage``, which normalises by
+    the defender's HP and incorporates the relevant offensive/defensive
+    stats. Offense is uniform mean because we don't know which opp the
+    lead will face first; defense is the max because a single one-shot
+    threat removes the lead in doubles regardless of how rare it is.
+
+    HP normalisation is asymmetric on purpose: the offense term divides
+    by the opp's ``MAX_HP`` (how lethal are we against them), while the
+    defense term divides by our own ``MAX_HP`` (how lethal are they
+    against us). Both terms live on the same dimensionless "fraction of
+    HP" scale, so the subtraction is meaningful.
+
+    Returns 0.0 on an empty opp team -- matches every other scorer's
+    degenerate case so stable index tiebreak applies in the caller.
+    """
+    if not opp_team.members:
+        return 0.0
+    offense_total = 0.0
+    max_defense = 0.0
+    for opp in opp_team.members:
+        offense_total += _best_effective_damage(my_pkm, opp, params)
+        threat = _best_effective_damage(opp, my_pkm, params)
+        if threat > max_defense:
+            max_defense = threat
+    return (offense_total / len(opp_team.members)) - max_defense
+
+
+class BulkAwareDamageThreatSelectionPolicy(DamageThreatSelectionPolicy):
+    """Bulk-aware damage-threat selection: damage as fraction of defender HP.
+
+    Strict refinement of ``DamageThreatSelectionPolicy`` along the bulk
+    axis. Every other damage-aware policy in this module ranks leads on
+    ``BP * STAB * type_eff`` -- the BP-only proxy. That collapses bulk
+    differences entirely: a 110-BP STAB super-effective hit ranks the
+    same against a frail support (low HP, low DEF) and against a
+    defensive tank (high HP, high DEF). The vgc2 damage formula
+    (``damage_calculator.calculate_damage``) is linear in both
+    ``base_power`` AND ``attacking_stats[atk] / defending_stats[def_]``,
+    so the BP-only proxy is missing two real signals; the actually-
+    relevant quantity in doubles is "what fraction of the defender HP
+    does the hit remove", which selects the lead most likely to OHKO a
+    key threat.
+
+    Single-axis change vs ``DamageThreatSelectionPolicy``:
+
+    - Replaces ``_best_damage_potential`` (``BP * STAB * type_eff /
+      _BP_NORMALIZER``) with ``_best_effective_damage`` (``BP * STAB *
+      type_eff * (atk / def_) / max_hp``). Stats are picked by move
+      category -- PHYSICAL uses ``ATTACK / DEFENSE``, SPECIAL uses
+      ``SPECIAL_ATTACK / SPECIAL_DEFENSE`` -- mirroring the engine's
+      branch in ``calculate_damage``.
+    - Same mean-offense / max-defense aggregation as the parent. Same
+      sort-by-score / stable index tiebreak shape.
+
+    Theoretical leverage over the parent and current default:
+
+    - Bulk asymmetry: a 110-BP STAB SE hit against a 250-HP / 70-DEF
+      frail target scores much higher than the same hit against a
+      350-HP / 170-DEF bulky target at the same atk. The team builder's
+      ``MinimaxTeamBuildPolicy`` is bulk-agnostic too, so it can pick a
+      build with a frail offensive partner and a bulky defensive anchor;
+      this scorer correctly prefers the offensive lead vs frail opps and
+      the defensive lead vs bulky opps.
+    - Nature/EV awareness: ``Pokemon.stats`` is the post-EV/IV/nature
+      value computed at construction time. The team-build's ATK/SPA
+      boosting natures (LONELY, ADAMANT, MODEST, NAUGHTY) and 252 EV
+      allocations now feed into selection -- two leads with identical
+      moves but different stat spreads no longer tie under this scorer.
+    - Coherent with ``DamageThreatSelectionPolicy`` and
+      ``SpeedDamageThreatSelectionPolicy``: those already promote
+      high-BP leads; this extends the promotion to also prefer leads
+      whose attacking stat best exploits the opp's weaker defense
+      column (e.g. a special attacker against a phys-bulky / spec-frail
+      opp).
+
+    Falls back to a stable index sort when the opp team is empty,
+    matching the degenerate-case behaviour of every other scorer here.
+
+    Ignores ``meta`` on purpose -- this isolates the bulk-aware
+    damage-primitive improvement from any usage-prior, pair-coverage,
+    or speed-tier composition. The minimax team builder is fully
+    meta-agnostic anyway, so the compound stays deterministic across
+    epochs. Future compounds can stack meta-weighting or pair-coverage
+    on top of this primitive.
+    """
+
+    def decision(self, teams: tuple[Team, Team], max_size: int) -> SelectionCommand:
+        my_team, opp_team = teams
+        params: BattleRuleParam = self.params
+        scored = [
+            (
+                -_bulk_aware_damage_threat_score(p, opp_team, params),
+                i,
+            )
+            for i, p in enumerate(my_team.members)
+        ]
+        scored.sort()
+        ordered = [i for _, i in scored]
+        return ordered[:max_size]
+
+
 VgcAiSelectionPolicy = MatchupAwareSelectionPolicy
 
 __all__ = [
+    "BulkAwareDamageThreatSelectionPolicy",
     "DamageThreatSelectionPolicy",
     "MatchupAwareSelectionPolicy",
     "MetaDamageThreatSelectionPolicy",

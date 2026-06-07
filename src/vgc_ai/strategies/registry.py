@@ -33,6 +33,7 @@ from vgc_ai.policies.library_teambuild import LibraryTeamBuildPolicy
 from vgc_ai.policies.meta_balance import NoOpMetaBalancePolicy
 from vgc_ai.policies.rule_balance import DefaultRuleBalancePolicy
 from vgc_ai.policies.selection import (
+    BulkAwareDamageThreatSelectionPolicy,
     DamageThreatSelectionPolicy,
     MatchupAwareSelectionPolicy,
     MetaDamageThreatSelectionPolicy,
@@ -341,6 +342,28 @@ CHAMPIONSHIP_STRATEGIES: dict[str, ChampionshipStrategy] = {
             name="minimax+meta_damage_threat_selection",
             team_build_policy=MinimaxTeamBuildPolicy,
             selection_policy=MetaDamageThreatSelectionPolicy,
+        ),
+        # Bulk-aware refinement of DamageThreatSelectionPolicy: replaces
+        # the BP-only damage primitive (`BP * STAB * type_eff /
+        # _BP_NORMALIZER`) with a per-HP one (`BP * STAB * type_eff *
+        # (atk / def_) / max_hp`). Stats are picked by move category --
+        # PHYSICAL uses ATTACK/DEFENSE, SPECIAL uses SPECIAL_ATTACK/
+        # SPECIAL_DEFENSE -- mirroring the engine's branch in
+        # `calculate_damage`. Same mean-offense / max-defense aggregation
+        # as the parent, so the structural change isolates the
+        # bulk-awareness lever. Theoretical leverage: the vgc2 damage
+        # formula is linear in both BP AND (atk/def_), and the practical
+        # question is "what fraction of HP does the hit remove" -- a
+        # 110-BP STAB SE hit against a 250-HP / 70-DEF frail target is
+        # a OHKO where the same hit on a 350-HP / 170-DEF bulky target
+        # only chips. Same LP-minimax team builder as the current default
+        # so the bench delta isolates the selection-layer primitive
+        # swap. Falls back to a stable index sort when the opp team is
+        # empty, matching every other scorer's degenerate case.
+        ChampionshipStrategy(
+            name="minimax+bulk_aware_damage_threat_selection",
+            team_build_policy=MinimaxTeamBuildPolicy,
+            selection_policy=BulkAwareDamageThreatSelectionPolicy,
         ),
     )
 }
